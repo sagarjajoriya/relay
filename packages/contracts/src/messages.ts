@@ -1,0 +1,43 @@
+import { z } from "zod";
+
+export const sendMessageSchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+export type SendMessageInput = z.infer<typeof sendMessageSchema>;
+
+export const editMessageSchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+export type EditMessageInput = z.infer<typeof editMessageSchema>;
+
+export const listMessagesQuerySchema = z.object({
+  // Opaque keyset cursor; pass the previous page's nextCursor to fetch older.
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+});
+export type ListMessagesQuery = z.infer<typeof listMessagesQuerySchema>;
+
+export interface MessageAuthor {
+  id: string;
+  displayName: string;
+}
+
+// The canonical message shape. REST returns this today; M3 will broadcast the
+// identical object over WebSocket as `message.created` / `message.updated`, so
+// this interface is the single contract both transports share.
+export interface MessageResponse {
+  id: string;
+  channelId: string;
+  author: MessageAuthor;
+  // null when the message is a tombstone (soft-deleted).
+  content: string | null;
+  createdAt: string;
+  editedAt: string | null;
+  deletedAt: string | null;
+}
+
+export interface PaginatedMessages {
+  // Newest-first. Feed nextCursor back to load the older page.
+  messages: MessageResponse[];
+  nextCursor: string | null;
+}

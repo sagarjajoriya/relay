@@ -27,13 +27,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json();
 }
 
+function authHeaders(token?: string): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export const api = {
-  get: <T>(path: string, token?: string) =>
-    request<T>(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} }),
+  get: <T>(path: string, token?: string) => request<T>(path, { headers: authHeaders(token) }),
   post: <T>(path: string, body: unknown, token?: string) =>
-    request<T>(path, {
-      method: "POST",
-      body: JSON.stringify(body),
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    }),
+    request<T>(path, { method: "POST", body: JSON.stringify(body), headers: authHeaders(token) }),
+  patch: <T>(path: string, body: unknown, token?: string) =>
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body), headers: authHeaders(token) }),
+  del: <T>(path: string, token?: string) =>
+    request<T>(path, { method: "DELETE", headers: authHeaders(token) }),
 };

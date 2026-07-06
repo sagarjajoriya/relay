@@ -15,8 +15,11 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  memberships   WorkspaceMember[]
-  refreshTokens RefreshToken[]
+  memberships       WorkspaceMember[]
+  refreshTokens     RefreshToken[]
+  createdChannels   Channel[]
+  channelMembers    ChannelMember[]
+  messages          Message[]
 
   @@map("users")
 }
@@ -28,7 +31,8 @@ model Workspace {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members WorkspaceMember[]
+  members  WorkspaceMember[]
+  channels Channel[]
 
   @@map("workspaces")
 }
@@ -69,4 +73,70 @@ model RefreshToken {
 
   @@index([userId])
   @@map("refresh_tokens")
+}
+
+enum ChannelType {
+  PUBLIC
+  PRIVATE
+  // DM is reserved so the read path (messages-in-a-channel) is identical when
+  // we add direct messages later — no schema migration, just new endpoints.
+  DM
+}
+
+model Channel {
+  id          String      @id @default(cuid())
+  workspaceId String
+  type        ChannelType @default(PUBLIC)
+  name        String
+  topic       String?
+  createdById String
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  archivedAt  DateTime?
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User            @relation(fields: [createdById], references: [id])
+  members   ChannelMember[]
+  messages  Message[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@map("channels")
+}
+
+// Membership rows gate PRIVATE channels. PUBLIC channels are readable/postable
+// by any workspace member without a row here (see WorkspacesService membership);
+// a row is only created for public channels when a user explicitly joins, which
+// we'll use for sidebar ordering / last-read in a later milestone.
+model ChannelMember {
+  id        String   @id @default(cuid())
+  channelId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+  @@index([userId])
+  @@map("channel_members")
+}
+
+model Message {
+  id        String    @id @default(cuid())
+  channelId String
+  authorId  String
+  content   String
+  createdAt DateTime  @default(now())
+  editedAt  DateTime?
+  // Soft delete: the row survives as a tombstone so future thread replies don't
+  // dangle and clients can render "message deleted" instead of a gap.
+  deletedAt DateTime?
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id])
+
+  // Compound index backs the (createdAt, id) keyset cursor used for pagination.
+  @@index([channelId, createdAt, id])
+  @@map("messages")
 }

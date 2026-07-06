@@ -7,6 +7,7 @@ Stack: Next.js (`apps/web`), NestJS (`apps/api`), PostgreSQL + Prisma (`packages
 ## Milestone status
 
 - **M1 — Identity & Workspaces**: done. Register/login (JWT access + rotating refresh tokens), workspace create/join/list with roles.
+- **M2 — Channels & Messages (REST)**: done. Public/private channels (DM type reserved), channel membership gating private access, send/list/edit/soft-delete messages with keyset cursor pagination. No real-time yet — that's M3.
 
 ## Local setup
 
@@ -60,4 +61,7 @@ Visit http://localhost:3000, register an account, create a workspace.
 - **Auth**: JWT access tokens (15m, stateless) + rotating refresh tokens (hashed in Postgres, reuse detection revokes the whole chain). See `apps/api/src/auth/auth.service.ts`.
 - **Validation**: zod schemas live in `packages/contracts` and are the single source of truth for request shapes — consumed by the API via `ZodValidationPipe` and by the web app directly, instead of duplicating rules across a class-validator DTO layer and frontend form validation.
 - **Multi-tenancy**: shared schema, `workspaceId` foreign keys. Roles are a plain enum on `WorkspaceMember`; a real permissions system is deferred to the authorization-hardening milestone once there's enough surface area to justify it.
+- **Message pagination**: keyset (cursor) pagination over `(createdAt, id)`, not offset — stable under concurrent inserts and no offset scan cost. The cursor is an opaque base64 blob so its internals can change without breaking clients. See `apps/api/src/messages/cursor.ts`.
+- **Soft delete**: messages are tombstoned (`deletedAt`), not removed, so future thread replies don't dangle and clients render "message deleted". Message payloads are defined once in `@relay/contracts` in the exact shape M3 will broadcast over WebSocket.
+- **Channel access**: public channels are open to any workspace member (no membership row); private channels require an explicit `ChannelMember` row and 404 (not 403) to non-members so their existence never leaks.
 - **Docker**: intentionally not used yet beyond local Postgres. `docker-compose` shows up once there are multiple services worth orchestrating together (real-time workers, queues) — see the roadmap.

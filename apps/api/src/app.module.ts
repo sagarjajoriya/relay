@@ -4,6 +4,8 @@ import { validateEnv } from "./config/env.validation";
 import { AuthModule } from "./auth/auth.module";
 import { UsersModule } from "./users/users.module";
 import { WorkspacesModule } from "./workspaces/workspaces.module";
+import { ChannelsModule } from "./channels/channels.module";
+import { MessagesModule } from "./messages/messages.module";
 
 @Module({
   imports: [
@@ -14,6 +16,8 @@ import { WorkspacesModule } from "./workspaces/workspaces.module";
     AuthModule,
     UsersModule,
     WorkspacesModule,
+    ChannelsModule,
+    MessagesModule,
   ],
 })
 export class AppModule {}

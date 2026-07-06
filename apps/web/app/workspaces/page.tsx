@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import type { WorkspaceResponse } from "@relay/contracts";
@@ -67,7 +68,7 @@ export default function WorkspacesPage() {
       <ul>
         {workspaces.map((w) => (
           <li key={w.id}>
-            {w.name} <code>#{w.slug}</code> — {w.role}
+            <Link href={`/workspaces/${w.id}`}>{w.name}</Link> <code>#{w.slug}</code> — {w.role}
           </li>
         ))}
         {workspaces.length === 0 && <li>No workspaces yet.</li>}
