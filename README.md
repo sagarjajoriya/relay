@@ -8,6 +8,7 @@ Stack: Next.js (`apps/web`), NestJS (`apps/api`), PostgreSQL + Prisma (`packages
 
 - **M1 — Identity & Workspaces**: done. Register/login (JWT access + rotating refresh tokens), workspace create/join/list with roles.
 - **M2 — Channels & Messages (REST)**: done. Public/private channels (DM type reserved), channel membership gating private access, send/list/edit/soft-delete messages with keyset cursor pagination. No real-time yet — that's M3.
+- **M3 — Real-time core**: done. Socket.io gateway with JWT-verified handshake, per-channel rooms with server-side access checks on join, live `message.created/updated/deleted` broadcasts driven by domain events, ephemeral typing indicators. Single-instance only — cross-instance fan-out via Redis is M4.
 
 ## Local setup
 
@@ -64,4 +65,5 @@ Visit http://localhost:3000, register an account, create a workspace.
 - **Message pagination**: keyset (cursor) pagination over `(createdAt, id)`, not offset — stable under concurrent inserts and no offset scan cost. The cursor is an opaque base64 blob so its internals can change without breaking clients. See `apps/api/src/messages/cursor.ts`.
 - **Soft delete**: messages are tombstoned (`deletedAt`), not removed, so future thread replies don't dangle and clients render "message deleted". Message payloads are defined once in `@relay/contracts` in the exact shape M3 will broadcast over WebSocket.
 - **Channel access**: public channels are open to any workspace member (no membership row); private channels require an explicit `ChannelMember` row and 404 (not 403) to non-members so their existence never leaks.
+- **Real-time**: the HTTP write path emits domain events (`@nestjs/event-emitter`); the Socket.io gateway subscribes and broadcasts to per-channel rooms. The write path doesn't know the gateway exists — queue producers (M5) subscribe to the same events. Handshake is JWT-verified via Socket.io middleware (unauthenticated sockets never connect); `channel.join` re-runs the same `assertCanAccess` gate as REST. WS payloads reuse the REST `MessageResponse` contract verbatim.
 - **Docker**: intentionally not used yet beyond local Postgres. `docker-compose` shows up once there are multiple services worth orchestrating together (real-time workers, queues) — see the roadmap.

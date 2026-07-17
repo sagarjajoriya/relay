@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
-import type { ChannelResponse, MessageResponse, PaginatedMessages } from "@relay/contracts";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { WS_EVENTS, type ChannelResponse, type MessageResponse, type PaginatedMessages, type TypingEvent } from "@relay/contracts";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api";
+import { createSocket, type RelaySocket } from "@/lib/socket";
 
 export default function WorkspaceDetailPage() {
   const { id: workspaceId } = useParams<{ id: string }>();
@@ -19,10 +20,75 @@ export default function WorkspaceDetailPage() {
   const [draft, setDraft] = useState("");
   const [newChannel, setNewChannel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({}); // userId -> displayName
+  const socketRef = useRef<RelaySocket | null>(null);
+  // Handlers below are registered once per socket; this ref lets them see the
+  // current channel so a broadcast racing a channel switch can't leak into the
+  // wrong message list.
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
 
   useEffect(() => {
     if (ready && !user) router.push("/login");
   }, [ready, user, router]);
+
+  // One socket per page lifetime; message handlers are registered once and
+  // filter by the active channel via state updates keyed on channelId.
+  useEffect(() => {
+    if (!accessToken) return;
+    const socket = createSocket(accessToken);
+    socketRef.current = socket;
+
+    const upsert = (incoming: MessageResponse) => {
+      if (incoming.channelId !== activeIdRef.current) return;
+      setMessages((prev) => {
+        const idx = prev.findIndex((m) => m.id === incoming.id);
+        if (idx === -1) return [...prev, incoming];
+        const next = [...prev];
+        next[idx] = incoming;
+        return next;
+      });
+      // Any message activity clears that author's typing indicator.
+      setTypingUsers((prev) => {
+        if (!(incoming.author.id in prev)) return prev;
+        const { [incoming.author.id]: _, ...rest } = prev;
+        return rest;
+      });
+    };
+
+    socket.on(WS_EVENTS.messageCreated, upsert);
+    socket.on(WS_EVENTS.messageUpdated, upsert);
+    socket.on(WS_EVENTS.messageDeleted, upsert);
+    socket.on(WS_EVENTS.typing, (e: TypingEvent) =>
+      setTypingUsers((prev) => ({ ...prev, [e.user.id]: e.user.displayName })),
+    );
+    socket.on(WS_EVENTS.typingStopped, (e: TypingEvent) =>
+      setTypingUsers((prev) => {
+        const { [e.user.id]: _, ...rest } = prev;
+        return rest;
+      }),
+    );
+    socket.on("connect_error", (err) => setError(`Realtime connection failed: ${err.message}`));
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [accessToken]);
+
+  // Join the active channel's room (server re-checks access) and reset typing
+  // state on every switch.
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !activeId) return;
+    setTypingUsers({});
+    socket.emit(WS_EVENTS.channelJoin, { channelId: activeId }, (res) => {
+      if (!res.ok) setError(`Could not join channel: ${res.error}`);
+    });
+    return () => {
+      socket.emit(WS_EVENTS.channelLeave, { channelId: activeId });
+    };
+  }, [activeId]);
 
   const loadChannels = useCallback(async () => {
     if (!accessToken) return;
@@ -65,13 +131,38 @@ export default function WorkspaceDetailPage() {
     e.preventDefault();
     if (!accessToken || !activeId || !draft.trim()) return;
     setError(null);
+    stopTyping();
     try {
       const msg = await api.post<MessageResponse>(`/channels/${activeId}/messages`, { content: draft }, accessToken);
-      setMessages((prev) => [...prev, msg]);
+      // The room broadcast will usually beat this response; the id-deduping
+      // append keeps the message from showing twice either way.
+      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
       setDraft("");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to send");
     }
+  }
+
+  // Debounced typing signal: emit start on first keystroke, stop after 2s idle.
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function stopTyping() {
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    if (activeId) socketRef.current?.emit(WS_EVENTS.typingStop, { channelId: activeId });
+  }
+
+  function onDraftChange(value: string) {
+    setDraft(value);
+    if (!activeId || !socketRef.current) return;
+    if (!typingTimeoutRef.current) {
+      socketRef.current.emit(WS_EVENTS.typingStart, { channelId: activeId });
+    } else {
+      clearTimeout(typingTimeoutRef.current);
+    }
+    typingTimeoutRef.current = setTimeout(stopTyping, 2000);
   }
 
   async function onCreateChannel(e: FormEvent) {
@@ -160,13 +251,18 @@ export default function WorkspaceDetailPage() {
           {messages.length === 0 && <p style={{ color: "#999" }}>No messages yet.</p>}
         </div>
 
+        <p style={{ minHeight: 18, margin: 0, padding: "0 16px", color: "#999", fontSize: 12 }}>
+          {Object.values(typingUsers).length > 0 &&
+            `${Object.values(typingUsers).join(", ")} ${Object.values(typingUsers).length === 1 ? "is" : "are"} typing…`}
+        </p>
+
         {error && <p style={{ color: "crimson", padding: "0 16px" }}>{error}</p>}
 
         <form onSubmit={onSend} style={{ display: "flex", gap: 8, padding: 16, borderTop: "1px solid #ddd" }}>
           <input
             placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => onDraftChange(e.target.value)}
             disabled={!activeId}
             style={{ flex: 1 }}
           />

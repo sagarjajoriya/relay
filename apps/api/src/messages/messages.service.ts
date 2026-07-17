@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { EventEmitter2 } from "@nestjs/event-emitter";
 import { prisma } from "@relay/db";
-import type { ListMessagesQuery, MessageResponse, PaginatedMessages } from "@relay/contracts";
+import { WS_EVENTS, type ListMessagesQuery, type MessageResponse, type PaginatedMessages } from "@relay/contracts";
 import { ChannelsService } from "../channels/channels.service";
 import { decodeCursor, encodeCursor } from "./cursor";
 
@@ -19,7 +20,13 @@ const authorSelect = { select: { id: true, displayName: true } } as const;
 
 @Injectable()
 export class MessagesService {
-  constructor(private readonly channels: ChannelsService) {}
+  constructor(
+    private readonly channels: ChannelsService,
+    // Domain events decouple the HTTP write path from delivery: the realtime
+    // gateway subscribes today; queue producers (M5) subscribe to the same
+    // events without this service knowing either exists.
+    private readonly events: EventEmitter2,
+  ) {}
 
   async send(userId: string, channelId: string, content: string): Promise<MessageResponse> {
     await this.channels.assertCanAccess(userId, channelId);
@@ -29,7 +36,9 @@ export class MessagesService {
       include: { author: authorSelect },
     });
 
-    return this.toResponse(message);
+    const response = this.toResponse(message);
+    this.events.emit(WS_EVENTS.messageCreated, response);
+    return response;
   }
 
   async list(userId: string, channelId: string, query: ListMessagesQuery): Promise<PaginatedMessages> {
@@ -67,7 +76,9 @@ export class MessagesService {
       include: { author: authorSelect },
     });
 
-    return this.toResponse(updated);
+    const response = this.toResponse(updated);
+    this.events.emit(WS_EVENTS.messageUpdated, response);
+    return response;
   }
 
   async remove(userId: string, messageId: string): Promise<MessageResponse> {
@@ -83,7 +94,9 @@ export class MessagesService {
       include: { author: authorSelect },
     });
 
-    return this.toResponse(deleted);
+    const response = this.toResponse(deleted);
+    this.events.emit(WS_EVENTS.messageDeleted, response);
+    return response;
   }
 
   // Loads a message, enforces channel visibility, then author-only mutation.
