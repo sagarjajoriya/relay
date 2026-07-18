@@ -20,6 +20,7 @@ model User {
   createdChannels   Channel[]
   channelMembers    ChannelMember[]
   messages          Message[]
+  notifications     Notification[]
 
   @@map("users")
 }
@@ -139,4 +140,31 @@ model Message {
   // Compound index backs the (createdAt, id) keyset cursor used for pagination.
   @@index([channelId, createdAt, id])
   @@map("messages")
+}
+
+enum NotificationType {
+  // MENTION, DM, etc. arrive with M8 — the enum is the seam.
+  MESSAGE
+}
+
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  type        NotificationType @default(MESSAGE)
+  workspaceId String
+  channelId   String
+  messageId   String
+  readAt      DateTime?
+  // Null = no email sent: either the user was online (policy skip) or sending
+  // permanently failed after retries. In-app row exists regardless.
+  emailedAt   DateTime?
+  createdAt   DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Fan-out runs inside an at-least-once queue: retries re-run the worker, so
+  // inserts are deduped per (recipient, message) to keep it idempotent.
+  @@unique([userId, messageId])
+  @@index([userId, createdAt])
+  @@map("notifications")
 }

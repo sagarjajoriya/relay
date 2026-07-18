@@ -8,5 +8,6 @@ import { RealtimeGateway } from "./realtime.gateway";
   imports: [JwtModule.register({}), ChannelsModule],
   controllers: [PresenceController],
   providers: [RealtimeGateway],
+  exports: [RealtimeGateway],
 })
 export class RealtimeModule {}
