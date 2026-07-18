@@ -11,6 +11,7 @@ import { ChannelsModule } from "./channels/channels.module";
 import { MessagesModule } from "./messages/messages.module";
 import { NotificationsModule } from "./notifications/notifications.module";
 import { RealtimeModule } from "./realtime/realtime.module";
+import { SearchModule } from "./search/search.module";
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { RealtimeModule } from "./realtime/realtime.module";
     MessagesModule,
     RealtimeModule,
     NotificationsModule,
+    SearchModule,
   ],
 })
 export class AppModule {}

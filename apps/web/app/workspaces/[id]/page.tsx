@@ -3,7 +3,18 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { WS_EVENTS, type ChannelResponse, type MessageResponse, type PaginatedMessages, type PresenceEvent, type PresenceUser, type TypingEvent } from "@relay/contracts";
+import {
+  SEARCH_MARK_END,
+  SEARCH_MARK_START,
+  WS_EVENTS,
+  type ChannelResponse,
+  type MessageResponse,
+  type PaginatedMessages,
+  type PresenceEvent,
+  type PresenceUser,
+  type SearchResponse,
+  type TypingEvent,
+} from "@relay/contracts";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api";
 import { createSocket, type RelaySocket } from "@/lib/socket";
@@ -22,6 +33,8 @@ export default function WorkspaceDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({}); // userId -> displayName
   const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({}); // userId -> displayName
+  const [searchQ, setSearchQ] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
   const socketRef = useRef<RelaySocket | null>(null);
   // Handlers below are registered once per socket; this ref lets them see the
   // current channel so a broadcast racing a channel switch can't leak into the
@@ -186,6 +199,32 @@ export default function WorkspaceDetailPage() {
     typingTimeoutRef.current = setTimeout(stopTyping, 2000);
   }
 
+  async function onSearch(e: FormEvent) {
+    e.preventDefault();
+    if (!accessToken || !searchQ.trim()) return;
+    setError(null);
+    try {
+      const res = await api.get<SearchResponse>(
+        `/workspaces/${workspaceId}/search?q=${encodeURIComponent(searchQ)}`,
+        accessToken,
+      );
+      setSearchResults(res);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Search failed");
+    }
+  }
+
+  // Snippets arrive with control-char delimiters around matches; splitting and
+  // rendering as text nodes keeps untrusted message content out of any HTML
+  // path entirely.
+  function renderSnippet(snippet: string) {
+    return snippet.split(SEARCH_MARK_START).flatMap((part, i) => {
+      if (i === 0) return [<span key={i}>{part}</span>];
+      const [hit, rest] = part.split(SEARCH_MARK_END);
+      return [<mark key={i}>{hit}</mark>, <span key={`${i}r`}>{rest}</span>];
+    });
+  }
+
   async function onCreateChannel(e: FormEvent) {
     e.preventDefault();
     if (!accessToken || !newChannel.trim()) return;
@@ -257,9 +296,44 @@ export default function WorkspaceDetailPage() {
 
       {/* Message pane */}
       <section style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <header style={{ padding: 16, borderBottom: "1px solid #ddd" }}>
-          <strong>{activeChannel ? `${activeChannel.type === "PRIVATE" ? "🔒" : "#"} ${activeChannel.name}` : "…"}</strong>
+        <header
+          style={{ padding: 16, borderBottom: "1px solid #ddd", display: "flex", gap: 16, alignItems: "center" }}
+        >
+          <strong style={{ flexShrink: 0 }}>
+            {activeChannel ? `${activeChannel.type === "PRIVATE" ? "🔒" : "#"} ${activeChannel.name}` : "…"}
+          </strong>
+          <form onSubmit={onSearch} style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+            <input placeholder="Search workspace" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
+            <button type="submit">Search</button>
+            {searchResults && (
+              <button type="button" onClick={() => { setSearchResults(null); setSearchQ(""); }}>
+                ✕
+              </button>
+            )}
+          </form>
         </header>
+
+        {searchResults && (
+          <div style={{ borderBottom: "1px solid #ddd", maxHeight: "40%", overflowY: "auto", padding: 16 }}>
+            <p style={{ margin: "0 0 8px", color: "#999" }}>
+              {searchResults.results.length === 0
+                ? "No results."
+                : `${searchResults.results.length}${searchResults.hasMore ? "+" : ""} result(s)`}
+            </p>
+            {searchResults.results.map((r) => (
+              <div
+                key={r.messageId}
+                onClick={() => { setActiveId(r.channelId); setSearchResults(null); setSearchQ(""); }}
+                style={{ cursor: "pointer", padding: "6px 0", borderTop: "1px solid #eee" }}
+              >
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  #{r.channelName} · {r.author.displayName} · {new Date(r.createdAt).toLocaleString()}
+                </div>
+                <div>{renderSnippet(r.snippet)}</div>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
           {nextCursor && (

@@ -128,6 +128,10 @@ model Message {
   channelId String
   authorId  String
   content   String
+  // Stored generated column (see the message_search migration): Postgres
+  // recomputes to_tsvector('english', content) on every write, so search
+  // stays transactionally consistent with edits — no triggers, no app code.
+  searchVector Unsupported("tsvector")? @map("search_vector")
   createdAt DateTime  @default(now())
   editedAt  DateTime?
   // Soft delete: the row survives as a tombstone so future thread replies don't
