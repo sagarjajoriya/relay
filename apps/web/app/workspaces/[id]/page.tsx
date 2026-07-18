@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { WS_EVENTS, type ChannelResponse, type MessageResponse, type PaginatedMessages, type TypingEvent } from "@relay/contracts";
+import { WS_EVENTS, type ChannelResponse, type MessageResponse, type PaginatedMessages, type PresenceEvent, type PresenceUser, type TypingEvent } from "@relay/contracts";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api";
 import { createSocket, type RelaySocket } from "@/lib/socket";
@@ -21,6 +21,7 @@ export default function WorkspaceDetailPage() {
   const [newChannel, setNewChannel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({}); // userId -> displayName
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({}); // userId -> displayName
   const socketRef = useRef<RelaySocket | null>(null);
   // Handlers below are registered once per socket; this ref lets them see the
   // current channel so a broadcast racing a channel switch can't leak into the
@@ -68,7 +69,27 @@ export default function WorkspaceDetailPage() {
         return rest;
       }),
     );
+    socket.on(WS_EVENTS.presenceOnline, (e: PresenceEvent) => {
+      if (e.workspaceId !== workspaceId) return;
+      setOnlineUsers((prev) => ({ ...prev, [e.user.id]: e.user.displayName }));
+    });
+    socket.on(WS_EVENTS.presenceOffline, (e: PresenceEvent) => {
+      if (e.workspaceId !== workspaceId) return;
+      setOnlineUsers((prev) => {
+        const { [e.user.id]: _, ...rest } = prev;
+        return rest;
+      });
+    });
     socket.on("connect_error", (err) => setError(`Realtime connection failed: ${err.message}`));
+
+    // Seed the online list after the socket is up (so we don't miss the gap
+    // between fetch and subscribe).
+    socket.on("connect", () => {
+      api
+        .get<PresenceUser[]>(`/workspaces/${workspaceId}/presence`, accessToken)
+        .then((users) => setOnlineUsers(Object.fromEntries(users.map((u) => [u.id, u.displayName]))))
+        .catch(() => undefined);
+    });
 
     return () => {
       socket.disconnect();
@@ -221,6 +242,17 @@ export default function WorkspaceDetailPage() {
           />
           <button type="submit">+</button>
         </form>
+
+        <h3 style={{ marginTop: 20, marginBottom: 8 }}>Online</h3>
+        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          {Object.entries(onlineUsers).map(([id, name]) => (
+            <li key={id} style={{ padding: "2px 6px" }}>
+              <span style={{ color: "#2da44e" }}>●</span> {name}
+              {id === user.id && <span style={{ color: "#999" }}> (you)</span>}
+            </li>
+          ))}
+          {Object.keys(onlineUsers).length === 0 && <li style={{ color: "#999", padding: "2px 6px" }}>Nobody online</li>}
+        </ul>
       </aside>
 
       {/* Message pane */}

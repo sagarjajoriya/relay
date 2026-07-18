@@ -9,7 +9,8 @@ export const envSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(32),
   JWT_ACCESS_TTL: z.string().default("15m"),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
-  CORS_ORIGIN: z.string().default("http://localhost:3000"),
+  CORS_ORIGIN: z.string().default("http://localhost:3002"),
+  REDIS_URL: z.string().default("redis://localhost:6379"),
 });
 
 export type Env = z.infer<typeof envSchema>;

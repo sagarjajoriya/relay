@@ -14,6 +14,8 @@ import {
   typingSchema,
   WS_EVENTS,
   type MessageResponse,
+  type PresenceEvent,
+  type PresenceUser,
   type TypingEvent,
 } from "@relay/contracts";
 import { prisma } from "@relay/db";
@@ -24,11 +26,15 @@ import { ChannelsService } from "../channels/channels.service";
 interface SocketUser {
   userId: string;
   displayName: string;
+  // Stashed at connect so disconnect can broadcast offline without a DB hit.
+  workspaceIds: string[];
 }
 
-// Room-name helper: one room per channel. When the Redis adapter arrives in M4
-// these same room names fan out across instances with zero gateway changes.
+// Room names are instance-agnostic: the Redis adapter fans every room
+// broadcast out across all API instances.
 const channelRoom = (channelId: string) => `channel:${channelId}`;
+const workspaceRoom = (workspaceId: string) => `workspace:${workspaceId}`;
+const userRoom = (userId: string) => `user:${userId}`;
 
 @WebSocketGateway({
   // Decorator options are evaluated before Nest DI exists, so ConfigService
@@ -64,13 +70,64 @@ export class RealtimeGateway {
         if (!user) {
           return next(new Error("Unauthorized"));
         }
+        const memberships = await prisma.workspaceMember.findMany({
+          where: { userId: user.id },
+          select: { workspaceId: true },
+        });
         (socket.data as SocketUser).userId = user.id;
         (socket.data as SocketUser).displayName = user.displayName;
+        (socket.data as SocketUser).workspaceIds = memberships.map((m) => m.workspaceId);
         next();
       } catch {
         next(new Error("Unauthorized"));
       }
     });
+  }
+
+  // ---- Presence ----
+  // Built on adapter room queries (fetchSockets spans every instance via
+  // Redis) instead of hand-rolled counters in Redis: room state dies with its
+  // socket, so a crashed instance can never leave a user stuck "online".
+
+  async handleConnection(socket: Socket) {
+    const { userId, displayName, workspaceIds } = socket.data as SocketUser;
+    await socket.join([userRoom(userId), ...workspaceIds.map(workspaceRoom)]);
+
+    // First socket for this user anywhere -> they just came online.
+    const userSockets = await this.server.in(userRoom(userId)).fetchSockets();
+    if (userSockets.length === 1) {
+      this.emitPresence(WS_EVENTS.presenceOnline, { id: userId, displayName }, workspaceIds);
+    }
+  }
+
+  async handleDisconnect(socket: Socket) {
+    const { userId, displayName, workspaceIds } = socket.data as SocketUser;
+    if (!userId) return; // socket rejected during handshake
+
+    // Rooms are already vacated by now; zero remaining sockets -> offline.
+    const userSockets = await this.server.in(userRoom(userId)).fetchSockets();
+    if (userSockets.length === 0) {
+      this.emitPresence(WS_EVENTS.presenceOffline, { id: userId, displayName }, workspaceIds);
+    }
+  }
+
+  private emitPresence(event: string, user: PresenceUser, workspaceIds: string[]) {
+    for (const workspaceId of workspaceIds) {
+      const payload: PresenceEvent = { workspaceId, user };
+      this.server.to(workspaceRoom(workspaceId)).emit(event, payload);
+    }
+  }
+
+  // Who's online in a workspace = distinct users with a socket in its room,
+  // across all instances. Used by the REST presence endpoint.
+  async onlineUsersInWorkspace(workspaceId: string): Promise<PresenceUser[]> {
+    const sockets = await this.server.in(workspaceRoom(workspaceId)).fetchSockets();
+    const byId = new Map<string, PresenceUser>();
+    for (const s of sockets) {
+      const { userId, displayName } = s.data as SocketUser;
+      byId.set(userId, { id: userId, displayName });
+    }
+    return [...byId.values()];
   }
 
   @SubscribeMessage(WS_EVENTS.channelJoin)

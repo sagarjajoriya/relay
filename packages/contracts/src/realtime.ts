@@ -20,6 +20,18 @@ export interface TypingEvent {
   user: { id: string; displayName: string };
 }
 
+export interface PresenceUser {
+  id: string;
+  displayName: string;
+}
+
+// Emitted to a workspace room when a user's first socket connects (online) or
+// last socket disconnects (offline).
+export interface PresenceEvent {
+  workspaceId: string;
+  user: PresenceUser;
+}
+
 // Single source of truth for event names on both ends of the socket.
 export const WS_EVENTS = {
   // client -> server
@@ -34,6 +46,8 @@ export const WS_EVENTS = {
   messageDeleted: "message.deleted",
   typing: "typing",
   typingStopped: "typing.stopped",
+  presenceOnline: "presence.online",
+  presenceOffline: "presence.offline",
 } as const;
 
 export interface ServerToClientEvents {
@@ -42,6 +56,8 @@ export interface ServerToClientEvents {
   [WS_EVENTS.messageDeleted]: (message: MessageResponse) => void;
   [WS_EVENTS.typing]: (event: TypingEvent) => void;
   [WS_EVENTS.typingStopped]: (event: TypingEvent) => void;
+  [WS_EVENTS.presenceOnline]: (event: PresenceEvent) => void;
+  [WS_EVENTS.presenceOffline]: (event: PresenceEvent) => void;
 }
 
 export interface ClientToServerEvents {
