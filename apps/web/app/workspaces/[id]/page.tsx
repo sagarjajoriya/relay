@@ -35,6 +35,8 @@ export default function WorkspaceDetailPage() {
   const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({}); // userId -> displayName
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
+  const [pendingUploads, setPendingUploads] = useState<{ id: string; fileName: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
   const socketRef = useRef<RelaySocket | null>(null);
   // Handlers below are registered once per socket; this ref lets them see the
   // current channel so a broadcast racing a channel switch can't leak into the
@@ -163,17 +165,49 @@ export default function WorkspaceDetailPage() {
 
   async function onSend(e: FormEvent) {
     e.preventDefault();
-    if (!accessToken || !activeId || !draft.trim()) return;
+    if (!accessToken || !activeId) return;
+    if (!draft.trim() && pendingUploads.length === 0) return;
     setError(null);
     stopTyping();
     try {
-      const msg = await api.post<MessageResponse>(`/channels/${activeId}/messages`, { content: draft }, accessToken);
+      const msg = await api.post<MessageResponse>(
+        `/channels/${activeId}/messages`,
+        { content: draft, attachmentIds: pendingUploads.map((u) => u.id) },
+        accessToken,
+      );
       // The room broadcast will usually beat this response; the id-deduping
       // append keeps the message from showing twice either way.
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
       setDraft("");
+      setPendingUploads([]);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to send");
+    }
+  }
+
+  // Pre-signed upload: ask the API for a PUT URL, then send the bytes straight
+  // to object storage — they never pass through our API.
+  async function onPickFile(file: File) {
+    if (!accessToken || !activeId) return;
+    setError(null);
+    setUploading(true);
+    try {
+      const { attachmentId, uploadUrl } = await api.post<{ attachmentId: string; uploadUrl: string }>(
+        `/channels/${activeId}/attachments`,
+        { fileName: file.name, contentType: file.type || "application/octet-stream", sizeBytes: file.size },
+        accessToken,
+      );
+      const put = await fetch(uploadUrl, {
+        method: "PUT",
+        body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+      });
+      if (!put.ok) throw new ApiError(put.status, "Upload to storage failed");
+      setPendingUploads((prev) => [...prev, { id: attachmentId, fileName: file.name }]);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -352,6 +386,22 @@ export default function WorkspaceDetailPage() {
                   {m.editedAt && <em style={{ color: "#999" }}> (edited)</em>}
                 </span>
               )}
+              {!m.deletedAt &&
+                m.attachments.map((a) =>
+                  a.contentType.startsWith("image/") ? (
+                    <div key={a.id} style={{ marginTop: 4 }}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={a.downloadUrl} alt={a.fileName} style={{ maxWidth: 320, maxHeight: 240, borderRadius: 4 }} />
+                    </div>
+                  ) : (
+                    <div key={a.id} style={{ marginTop: 4 }}>
+                      <a href={a.downloadUrl} target="_blank" rel="noreferrer">
+                        📎 {a.fileName}
+                      </a>{" "}
+                      <span style={{ color: "#999", fontSize: 12 }}>({Math.ceil(a.sizeBytes / 1024)} KB)</span>
+                    </div>
+                  ),
+                )}
             </div>
           ))}
           {messages.length === 0 && <p style={{ color: "#999" }}>No messages yet.</p>}
@@ -364,7 +414,26 @@ export default function WorkspaceDetailPage() {
 
         {error && <p style={{ color: "crimson", padding: "0 16px" }}>{error}</p>}
 
+        {pendingUploads.length > 0 && (
+          <p style={{ margin: 0, padding: "4px 16px", color: "#666", fontSize: 12 }}>
+            📎 {pendingUploads.map((u) => u.fileName).join(", ")}{" "}
+            <button type="button" onClick={() => setPendingUploads([])}>clear</button>
+          </p>
+        )}
         <form onSubmit={onSend} style={{ display: "flex", gap: 8, padding: 16, borderTop: "1px solid #ddd" }}>
+          <label style={{ cursor: "pointer", alignSelf: "center" }} title="Attach a file">
+            {uploading ? "⏳" : "📎"}
+            <input
+              type="file"
+              hidden
+              disabled={!activeId || uploading}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) onPickFile(file);
+                e.target.value = "";
+              }}
+            />
+          </label>
           <input
             placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
             value={draft}
@@ -372,7 +441,7 @@ export default function WorkspaceDetailPage() {
             disabled={!activeId}
             style={{ flex: 1 }}
           />
-          <button type="submit" disabled={!activeId}>
+          <button type="submit" disabled={!activeId || uploading}>
             Send
           </button>
         </form>

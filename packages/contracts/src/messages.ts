@@ -1,8 +1,15 @@
 import { z } from "zod";
+import { MAX_ATTACHMENTS_PER_MESSAGE, type AttachmentResponse } from "./attachments";
 
-export const sendMessageSchema = z.object({
-  content: z.string().min(1).max(4000),
-});
+export const sendMessageSchema = z
+  .object({
+    content: z.string().max(4000).default(""),
+    attachmentIds: z.array(z.string().min(1)).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
+  })
+  .refine((v) => v.content.trim().length > 0 || (v.attachmentIds?.length ?? 0) > 0, {
+    message: "message needs text or at least one attachment",
+    path: ["content"],
+  });
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 
 export const editMessageSchema = z.object({
@@ -31,6 +38,8 @@ export interface MessageResponse {
   author: MessageAuthor;
   // null when the message is a tombstone (soft-deleted).
   content: string | null;
+  // Empty for tombstones; download URLs are short-lived pre-signed GETs.
+  attachments: AttachmentResponse[];
   createdAt: string;
   editedAt: string | null;
   deletedAt: string | null;

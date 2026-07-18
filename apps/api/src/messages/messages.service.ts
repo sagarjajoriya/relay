@@ -1,12 +1,19 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { EventEmitter2 } from "@nestjs/event-emitter";
-import { prisma } from "@relay/db";
-import { WS_EVENTS, type ListMessagesQuery, type MessageResponse, type PaginatedMessages } from "@relay/contracts";
+import { prisma, type Attachment } from "@relay/db";
+import {
+  WS_EVENTS,
+  type ListMessagesQuery,
+  type MessageResponse,
+  type PaginatedMessages,
+  type SendMessageInput,
+} from "@relay/contracts";
+import { AttachmentsService } from "../attachments/attachments.service";
 import { ChannelsService } from "../channels/channels.service";
 import { decodeCursor, encodeCursor } from "./cursor";
 
-// Row shape shared by every query below (message + minimal author projection).
-type MessageWithAuthor = {
+// Row shape shared by every query below (message + author + attachments).
+type MessageRow = {
   id: string;
   channelId: string;
   content: string;
@@ -14,29 +21,47 @@ type MessageWithAuthor = {
   editedAt: Date | null;
   deletedAt: Date | null;
   author: { id: string; displayName: string };
+  attachments: Attachment[];
 };
 
-const authorSelect = { select: { id: true, displayName: true } } as const;
+const messageInclude = {
+  author: { select: { id: true, displayName: true } },
+  attachments: true,
+} as const;
 
 @Injectable()
 export class MessagesService {
   constructor(
     private readonly channels: ChannelsService,
+    private readonly attachments: AttachmentsService,
     // Domain events decouple the HTTP write path from delivery: the realtime
     // gateway subscribes today; queue producers (M5) subscribe to the same
     // events without this service knowing either exists.
     private readonly events: EventEmitter2,
   ) {}
 
-  async send(userId: string, channelId: string, content: string): Promise<MessageResponse> {
+  async send(userId: string, channelId: string, input: SendMessageInput): Promise<MessageResponse> {
     await this.channels.assertCanAccess(userId, channelId);
 
-    const message = await prisma.message.create({
-      data: { channelId, authorId: userId, content },
-      include: { author: authorSelect },
+    const attachmentIds = input.attachmentIds ?? [];
+    if (attachmentIds.length > 0) {
+      // Storage HEADs and ownership checks happen before the transaction (no
+      // external calls inside it); the PENDING-status guard inside linkToMessage
+      // still makes concurrent double-links abort.
+      await this.attachments.validateForLink(userId, channelId, attachmentIds);
+    }
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.message.create({
+        data: { channelId, authorId: userId, content: input.content },
+      });
+      if (attachmentIds.length > 0) {
+        await this.attachments.linkToMessage(tx, attachmentIds, created.id);
+      }
+      return tx.message.findUniqueOrThrow({ where: { id: created.id }, include: messageInclude });
     });
 
-    const response = this.toResponse(message);
+    const response = await this.toResponse(message);
     this.events.emit(WS_EVENTS.messageCreated, response);
     return response;
   }
@@ -54,14 +79,14 @@ export class MessagesService {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take,
       ...(decoded ? { cursor: { id: decoded.i }, skip: 1 } : {}),
-      include: { author: authorSelect },
+      include: messageInclude,
     });
 
     const hasMore = rows.length > query.limit;
     const page = hasMore ? rows.slice(0, query.limit) : rows;
     const nextCursor = hasMore ? encodeCursor(page[page.length - 1]) : null;
 
-    return { messages: page.map((m) => this.toResponse(m)), nextCursor };
+    return { messages: await Promise.all(page.map((m) => this.toResponse(m))), nextCursor };
   }
 
   async edit(userId: string, messageId: string, content: string): Promise<MessageResponse> {
@@ -73,10 +98,10 @@ export class MessagesService {
     const updated = await prisma.message.update({
       where: { id: messageId },
       data: { content, editedAt: new Date() },
-      include: { author: authorSelect },
+      include: messageInclude,
     });
 
-    const response = this.toResponse(updated);
+    const response = await this.toResponse(updated);
     this.events.emit(WS_EVENTS.messageUpdated, response);
     return response;
   }
@@ -91,19 +116,19 @@ export class MessagesService {
     const deleted = await prisma.message.update({
       where: { id: messageId },
       data: { deletedAt: new Date() },
-      include: { author: authorSelect },
+      include: messageInclude,
     });
 
-    const response = this.toResponse(deleted);
+    const response = await this.toResponse(deleted);
     this.events.emit(WS_EVENTS.messageDeleted, response);
     return response;
   }
 
   // Loads a message, enforces channel visibility, then author-only mutation.
-  private async loadOwnedMessage(userId: string, messageId: string): Promise<MessageWithAuthor & { authorId: string }> {
+  private async loadOwnedMessage(userId: string, messageId: string): Promise<MessageRow & { authorId: string }> {
     const message = await prisma.message.findUnique({
       where: { id: messageId },
-      include: { author: authorSelect },
+      include: messageInclude,
     });
     if (!message) {
       throw new NotFoundException("Message not found");
@@ -118,13 +143,15 @@ export class MessagesService {
     return message;
   }
 
-  private toResponse(message: MessageWithAuthor): MessageResponse {
+  private async toResponse(message: MessageRow): Promise<MessageResponse> {
     const isTombstone = message.deletedAt !== null;
     return {
       id: message.id,
       channelId: message.channelId,
       author: { id: message.author.id, displayName: message.author.displayName },
       content: isTombstone ? null : message.content,
+      // Tombstones hide their attachments along with their content.
+      attachments: isTombstone ? [] : await this.attachments.toResponses(message.attachments),
       createdAt: message.createdAt.toISOString(),
       editedAt: message.editedAt?.toISOString() ?? null,
       deletedAt: message.deletedAt?.toISOString() ?? null,

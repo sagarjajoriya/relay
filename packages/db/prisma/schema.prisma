@@ -21,6 +21,7 @@ model User {
   channelMembers    ChannelMember[]
   messages          Message[]
   notifications     Notification[]
+  attachments       Attachment[]
 
   @@map("users")
 }
@@ -96,9 +97,10 @@ model Channel {
   archivedAt  DateTime?
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  createdBy User            @relation(fields: [createdById], references: [id])
-  members   ChannelMember[]
-  messages  Message[]
+  createdBy   User            @relation(fields: [createdById], references: [id])
+  members     ChannelMember[]
+  messages    Message[]
+  attachments Attachment[]
 
   @@unique([workspaceId, name])
   @@index([workspaceId])
@@ -138,12 +140,42 @@ model Message {
   // dangle and clients can render "message deleted" instead of a gap.
   deletedAt DateTime?
 
-  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  author  User    @relation(fields: [authorId], references: [id])
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author      User         @relation(fields: [authorId], references: [id])
+  attachments Attachment[]
 
   // Compound index backs the (createdAt, id) keyset cursor used for pagination.
   @@index([channelId, createdAt, id])
   @@map("messages")
+}
+
+enum AttachmentStatus {
+  // PENDING = presigned URL issued, upload not yet confirmed by a message
+  // send. Orphaned PENDING rows are garbage-collected by a delayed queue job.
+  PENDING
+  ATTACHED
+}
+
+model Attachment {
+  id          String           @id @default(cuid())
+  uploaderId  String
+  channelId   String
+  // Set when a message send confirms the upload; the PENDING->ATTACHED
+  // transition inside that transaction is also the double-link guard.
+  messageId   String?
+  status      AttachmentStatus @default(PENDING)
+  storageKey  String           @unique
+  fileName    String
+  contentType String
+  sizeBytes   Int
+  createdAt   DateTime         @default(now())
+
+  uploader User     @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  channel  Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  message  Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([messageId])
+  @@map("attachments")
 }
 
 enum NotificationType {

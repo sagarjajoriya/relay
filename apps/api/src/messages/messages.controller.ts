@@ -23,7 +23,7 @@ export class MessagesController {
     @Param("channelId") channelId: string,
     @Body(new ZodValidationPipe(sendMessageSchema)) body: SendMessageInput,
   ) {
-    return this.messages.send(user.userId, channelId, body.content);
+    return this.messages.send(user.userId, channelId, body);
   }
 
   @Get("channels/:channelId/messages")

@@ -7,6 +7,7 @@ import { AuthModule } from "./auth/auth.module";
 import { UsersModule } from "./users/users.module";
 import { WorkspacesModule } from "./workspaces/workspaces.module";
 import { EventEmitterModule } from "@nestjs/event-emitter";
+import { AttachmentsModule } from "./attachments/attachments.module";
 import { ChannelsModule } from "./channels/channels.module";
 import { MessagesModule } from "./messages/messages.module";
 import { NotificationsModule } from "./notifications/notifications.module";
@@ -36,6 +37,7 @@ import { SearchModule } from "./search/search.module";
     RealtimeModule,
     NotificationsModule,
     SearchModule,
+    AttachmentsModule,
   ],
 })
 export class AppModule {}
