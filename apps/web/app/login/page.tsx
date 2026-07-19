@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
+import { AuthCard } from "@/components/auth-card";
 import { useAuth } from "@/lib/auth-context";
 import { ApiError } from "@/lib/api";
 
@@ -28,22 +30,46 @@ export default function LoginPage() {
   }
 
   return (
-    <main style={{ maxWidth: 360, margin: "80px auto" }}>
-      <h1>Log in</h1>
-      <form onSubmit={onSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <input placeholder="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input
-          placeholder="Password"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          required
-        />
-        {error && <p style={{ color: "crimson" }}>{error}</p>}
-        <button type="submit" disabled={submitting}>
-          {submitting ? "Logging in..." : "Log in"}
+    <AuthCard subtitle="Sign in to your workspace">
+      <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        <div>
+          <label className="field-label" htmlFor="email">
+            Email address
+          </label>
+          <input
+            id="email"
+            className="input-field"
+            placeholder="name@company.com"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </div>
+        <div>
+          <label className="field-label" htmlFor="password">
+            Password
+          </label>
+          <input
+            id="password"
+            className={`input-field ${error ? "border-danger focus:border-danger focus:ring-danger/20" : ""}`}
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+          {error && <p className="field-error">{error}</p>}
+        </div>
+        <button type="submit" className="btn-primary mt-2 py-2.5" disabled={submitting}>
+          {submitting ? "Logging in…" : "Log in"}
         </button>
       </form>
-    </main>
+      <div className="mt-6 border-t border-line pt-5 text-center text-sm text-ink-muted">
+        Don&apos;t have an account?{" "}
+        <Link href="/register" className="font-semibold text-primary hover:underline">
+          Sign up
+        </Link>
+      </div>
+    </AuthCard>
   );
 }

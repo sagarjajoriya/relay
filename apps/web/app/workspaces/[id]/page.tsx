@@ -4,6 +4,16 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
+  ArrowLeft,
+  Hash,
+  Lock,
+  Paperclip,
+  Search,
+  SendHorizonal,
+  WifiOff,
+  X,
+} from "lucide-react";
+import {
   SEARCH_MARK_END,
   SEARCH_MARK_START,
   WS_EVENTS,
@@ -15,9 +25,22 @@ import {
   type SearchResponse,
   type TypingEvent,
 } from "@relay/contracts";
+import { Avatar } from "@/components/avatar";
+import { MessageRow } from "@/components/message-row";
+import { NotificationsBell } from "@/components/notifications-bell";
 import { useAuth } from "@/lib/auth-context";
 import { api, ApiError } from "@/lib/api";
 import { createSocket, type RelaySocket } from "@/lib/socket";
+
+function dayLabel(iso: string): string {
+  const date = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return date.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+}
 
 export default function WorkspaceDetailPage() {
   const { id: workspaceId } = useParams<{ id: string }>();
@@ -30,7 +53,9 @@ export default function WorkspaceDetailPage() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [newChannel, setNewChannel] = useState("");
+  const [newChannelPrivate, setNewChannelPrivate] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [disconnected, setDisconnected] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({}); // userId -> displayName
   const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({}); // userId -> displayName
   const [searchQ, setSearchQ] = useState("");
@@ -38,6 +63,7 @@ export default function WorkspaceDetailPage() {
   const [pendingUploads, setPendingUploads] = useState<{ id: string; fileName: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const socketRef = useRef<RelaySocket | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
   // Handlers below are registered once per socket; this ref lets them see the
   // current channel so a broadcast racing a channel switch can't leak into the
   // wrong message list.
@@ -48,8 +74,38 @@ export default function WorkspaceDetailPage() {
     if (ready && !user) router.push("/login");
   }, [ready, user, router]);
 
+  const loadChannels = useCallback(async () => {
+    if (!accessToken) return;
+    const data = await api.get<ChannelResponse[]>(`/workspaces/${workspaceId}/channels`, accessToken);
+    setChannels(data);
+    setActiveId((current) => current ?? data[0]?.id ?? null);
+  }, [accessToken, workspaceId]);
+
+  useEffect(() => {
+    if (accessToken) loadChannels().catch((e) => setError(String(e)));
+  }, [accessToken, loadChannels]);
+
+  // Load the newest page whenever the active channel changes.
+  useEffect(() => {
+    if (!accessToken || !activeId) return;
+    let cancelled = false;
+    (async () => {
+      const page = await api.get<PaginatedMessages>(`/channels/${activeId}/messages?limit=30`, accessToken);
+      if (cancelled) return;
+      setMessages([...page.messages].reverse());
+      setNextCursor(page.nextCursor);
+    })().catch((e) => setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, activeId]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" });
+  }, [messages.length, activeId]);
+
   // One socket per page lifetime; message handlers are registered once and
-  // filter by the active channel via state updates keyed on channelId.
+  // filter by the active channel via the ref above.
   useEffect(() => {
     if (!accessToken) return;
     const socket = createSocket(accessToken);
@@ -95,11 +151,13 @@ export default function WorkspaceDetailPage() {
         return rest;
       });
     });
-    socket.on("connect_error", (err) => setError(`Realtime connection failed: ${err.message}`));
+    socket.on("connect_error", () => setDisconnected(true));
+    socket.on("disconnect", () => setDisconnected(true));
 
     // Seed the online list after the socket is up (so we don't miss the gap
     // between fetch and subscribe).
     socket.on("connect", () => {
+      setDisconnected(false);
       api
         .get<PresenceUser[]>(`/workspaces/${workspaceId}/presence`, accessToken)
         .then((users) => setOnlineUsers(Object.fromEntries(users.map((u) => [u.id, u.displayName]))))
@@ -110,7 +168,8 @@ export default function WorkspaceDetailPage() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [accessToken]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, workspaceId]);
 
   // Join the active channel's room (server re-checks access) and reset typing
   // state on every switch.
@@ -126,41 +185,24 @@ export default function WorkspaceDetailPage() {
     };
   }, [activeId]);
 
-  const loadChannels = useCallback(async () => {
-    if (!accessToken) return;
-    const data = await api.get<ChannelResponse[]>(`/workspaces/${workspaceId}/channels`, accessToken);
-    setChannels(data);
-    setActiveId((current) => current ?? data[0]?.id ?? null);
-  }, [accessToken, workspaceId]);
-
-  useEffect(() => {
-    if (accessToken) loadChannels().catch((e) => setError(String(e)));
-  }, [accessToken, loadChannels]);
-
-  // Load the newest page whenever the active channel changes.
-  useEffect(() => {
-    if (!accessToken || !activeId) return;
-    let cancelled = false;
-    (async () => {
-      const page = await api.get<PaginatedMessages>(`/channels/${activeId}/messages?limit=30`, accessToken);
-      if (cancelled) return;
-      setMessages([...page.messages].reverse());
-      setNextCursor(page.nextCursor);
-    })().catch((e) => setError(String(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [accessToken, activeId]);
-
   async function loadOlder() {
     if (!accessToken || !activeId || !nextCursor) return;
     const page = await api.get<PaginatedMessages>(
       `/channels/${activeId}/messages?limit=30&cursor=${encodeURIComponent(nextCursor)}`,
       accessToken,
     );
-    // Older page is newest-first; reverse and prepend so it sits above current.
     setMessages((prev) => [...[...page.messages].reverse(), ...prev]);
     setNextCursor(page.nextCursor);
+  }
+
+  function upsertLocal(msg: MessageResponse) {
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === msg.id);
+      if (idx === -1) return [...prev, msg];
+      const next = [...prev];
+      next[idx] = msg;
+      return next;
+    });
   }
 
   async function onSend(e: FormEvent) {
@@ -175,9 +217,7 @@ export default function WorkspaceDetailPage() {
         { content: draft, attachmentIds: pendingUploads.map((u) => u.id) },
         accessToken,
       );
-      // The room broadcast will usually beat this response; the id-deduping
-      // append keeps the message from showing twice either way.
-      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      upsertLocal(msg);
       setDraft("");
       setPendingUploads([]);
     } catch (err) {
@@ -185,8 +225,22 @@ export default function WorkspaceDetailPage() {
     }
   }
 
-  // Pre-signed upload: ask the API for a PUT URL, then send the bytes straight
-  // to object storage — they never pass through our API.
+  async function onEditMessage(id: string, content: string) {
+    try {
+      upsertLocal(await api.patch<MessageResponse>(`/messages/${id}`, { content }, accessToken!));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to edit");
+    }
+  }
+
+  async function onDeleteMessage(id: string) {
+    try {
+      upsertLocal(await api.del<MessageResponse>(`/messages/${id}`, accessToken!));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to delete");
+    }
+  }
+
   async function onPickFile(file: File) {
     if (!accessToken || !activeId) return;
     setError(null);
@@ -255,7 +309,12 @@ export default function WorkspaceDetailPage() {
     return snippet.split(SEARCH_MARK_START).flatMap((part, i) => {
       if (i === 0) return [<span key={i}>{part}</span>];
       const [hit, rest] = part.split(SEARCH_MARK_END);
-      return [<mark key={i}>{hit}</mark>, <span key={`${i}r`}>{rest}</span>];
+      return [
+        <mark key={i} className="rounded bg-highlight px-0.5 font-semibold">
+          {hit}
+        </mark>,
+        <span key={`${i}r`}>{rest}</span>,
+      ];
     });
   }
 
@@ -266,10 +325,11 @@ export default function WorkspaceDetailPage() {
     try {
       const created = await api.post<ChannelResponse>(
         `/workspaces/${workspaceId}/channels`,
-        { name: newChannel, type: "PUBLIC" },
+        { name: newChannel, type: newChannelPrivate ? "PRIVATE" : "PUBLIC" },
         accessToken,
       );
       setNewChannel("");
+      setNewChannelPrivate(false);
       await loadChannels();
       setActiveId(created.id);
     } catch (err) {
@@ -280,171 +340,280 @@ export default function WorkspaceDetailPage() {
   if (!ready || !user) return null;
 
   const activeChannel = channels.find((c) => c.id === activeId) ?? null;
+  const channelNames = Object.fromEntries(channels.map((c) => [c.id, c.name]));
+  const typingNames = Object.values(typingUsers);
+
+  // Day-divider grouping (messages are already oldest -> newest).
+  const grouped: { label: string; items: MessageResponse[] }[] = [];
+  for (const m of messages) {
+    const label = dayLabel(m.createdAt);
+    const last = grouped[grouped.length - 1];
+    if (last && last.label === label) last.items.push(m);
+    else grouped.push({ label, items: [m] });
+  }
 
   return (
-    <main style={{ display: "flex", height: "100vh", fontSize: 14 }}>
-      {/* Channel sidebar */}
-      <aside style={{ width: 220, borderRight: "1px solid #ddd", padding: 16, overflowY: "auto" }}>
-        <Link href="/workspaces">← Workspaces</Link>
-        <h3 style={{ marginBottom: 8 }}>Channels</h3>
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {channels.map((c) => (
-            <li key={c.id} style={{ marginBottom: 4 }}>
-              <button
-                onClick={() => setActiveId(c.id)}
-                style={{
-                  background: c.id === activeId ? "#eef" : "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "4px 6px",
-                }}
-              >
-                {c.type === "PRIVATE" ? "🔒" : "#"} {c.name}
-              </button>
-            </li>
-          ))}
-        </ul>
-        <form onSubmit={onCreateChannel} style={{ marginTop: 12, display: "flex", gap: 4 }}>
-          <input
-            placeholder="new-channel"
-            value={newChannel}
-            onChange={(e) => setNewChannel(e.target.value)}
-            style={{ width: "100%" }}
-          />
-          <button type="submit">+</button>
-        </form>
+    <main className="flex h-screen text-sm">
+      {/* ---- Channel sidebar ---- */}
+      <aside className="flex w-64 shrink-0 flex-col bg-sidebar text-sidebar-ink">
+        <div className="flex items-center gap-2 border-b border-white/10 px-4 py-3">
+          <Link href="/workspaces" className="rounded p-1 hover:bg-sidebar-hover" title="All workspaces">
+            <ArrowLeft size={16} />
+          </Link>
+          <span className="truncate font-semibold text-white">Relay</span>
+        </div>
 
-        <h3 style={{ marginTop: 20, marginBottom: 8 }}>Online</h3>
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {Object.entries(onlineUsers).map(([id, name]) => (
-            <li key={id} style={{ padding: "2px 6px" }}>
-              <span style={{ color: "#2da44e" }}>●</span> {name}
-              {id === user.id && <span style={{ color: "#999" }}> (you)</span>}
-            </li>
-          ))}
-          {Object.keys(onlineUsers).length === 0 && <li style={{ color: "#999", padding: "2px 6px" }}>Nobody online</li>}
-        </ul>
+        <div className="flex-1 overflow-y-auto px-2 py-4">
+          <div className="px-2 pb-2 text-[11px] font-semibold uppercase tracking-widest text-sidebar-ink-dim">
+            Channels
+          </div>
+          <ul className="flex flex-col gap-0.5">
+            {channels.map((c) => (
+              <li key={c.id}>
+                <button
+                  onClick={() => setActiveId(c.id)}
+                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                    c.id === activeId
+                      ? "bg-primary text-white"
+                      : "text-sidebar-ink hover:bg-sidebar-hover hover:text-white"
+                  }`}
+                >
+                  {c.type === "PRIVATE" ? <Lock size={14} className="shrink-0" /> : <Hash size={14} className="shrink-0" />}
+                  <span className="truncate">{c.name}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          <form onSubmit={onCreateChannel} className="mt-3 flex flex-col gap-2 px-2">
+            <div className="flex gap-1.5">
+              <input
+                className="w-full rounded-lg border border-white/10 bg-sidebar-hover px-2 py-1.5 text-xs text-white placeholder:text-sidebar-ink-dim focus:border-primary focus:outline-none"
+                placeholder="new-channel"
+                value={newChannel}
+                onChange={(e) => setNewChannel(e.target.value)}
+              />
+              <button type="submit" className="rounded-lg bg-primary px-2.5 text-white hover:bg-primary-deep">
+                +
+              </button>
+            </div>
+            <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-sidebar-ink-dim">
+              <input
+                type="checkbox"
+                checked={newChannelPrivate}
+                onChange={(e) => setNewChannelPrivate(e.target.checked)}
+                className="accent-primary"
+              />
+              <Lock size={11} /> Private channel
+            </label>
+          </form>
+
+          <div className="mt-6 px-2 pb-2 text-[11px] font-semibold uppercase tracking-widest text-sidebar-ink-dim">
+            Online — {Object.keys(onlineUsers).length}
+          </div>
+          <ul className="flex flex-col gap-1 px-2">
+            {Object.entries(onlineUsers).map(([id, name]) => (
+              <li key={id} className="flex items-center gap-2 py-0.5">
+                <span className="h-2 w-2 rounded-full bg-success" />
+                <span className="truncate">
+                  {name}
+                  {id === user.id && <span className="text-sidebar-ink-dim"> (you)</span>}
+                </span>
+              </li>
+            ))}
+            {Object.keys(onlineUsers).length === 0 && (
+              <li className="text-xs text-sidebar-ink-dim">Nobody online</li>
+            )}
+          </ul>
+        </div>
+
+        <div className="flex items-center gap-2 border-t border-white/10 px-4 py-3">
+          <Avatar name={user.displayName} size="sm" online />
+          <span className="truncate text-xs text-white">{user.displayName}</span>
+        </div>
       </aside>
 
-      {/* Message pane */}
-      <section style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <header
-          style={{ padding: 16, borderBottom: "1px solid #ddd", display: "flex", gap: 16, alignItems: "center" }}
-        >
-          <strong style={{ flexShrink: 0 }}>
-            {activeChannel ? `${activeChannel.type === "PRIVATE" ? "🔒" : "#"} ${activeChannel.name}` : "…"}
-          </strong>
-          <form onSubmit={onSearch} style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-            <input placeholder="Search workspace" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
-            <button type="submit">Search</button>
-            {searchResults && (
-              <button type="button" onClick={() => { setSearchResults(null); setSearchQ(""); }}>
-                ✕
-              </button>
-            )}
-          </form>
-        </header>
-
-        {searchResults && (
-          <div style={{ borderBottom: "1px solid #ddd", maxHeight: "40%", overflowY: "auto", padding: 16 }}>
-            <p style={{ margin: "0 0 8px", color: "#999" }}>
-              {searchResults.results.length === 0
-                ? "No results."
-                : `${searchResults.results.length}${searchResults.hasMore ? "+" : ""} result(s)`}
-            </p>
-            {searchResults.results.map((r) => (
-              <div
-                key={r.messageId}
-                onClick={() => { setActiveId(r.channelId); setSearchResults(null); setSearchQ(""); }}
-                style={{ cursor: "pointer", padding: "6px 0", borderTop: "1px solid #eee" }}
-              >
-                <div style={{ fontSize: 12, color: "#666" }}>
-                  #{r.channelName} · {r.author.displayName} · {new Date(r.createdAt).toLocaleString()}
-                </div>
-                <div>{renderSnippet(r.snippet)}</div>
-              </div>
-            ))}
+      {/* ---- Main pane ---- */}
+      <section className="flex min-w-0 flex-1 flex-col bg-card">
+        {disconnected && (
+          <div className="flex items-center justify-center gap-2 bg-banner px-4 py-2 text-xs font-semibold text-white">
+            <WifiOff size={14} /> Connection lost — reconnecting…
           </div>
         )}
 
-        <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+        <header className="flex items-center gap-4 border-b border-line px-5 py-3">
+          <div className="flex min-w-0 items-center gap-2">
+            {activeChannel?.type === "PRIVATE" ? (
+              <Lock size={17} className="text-ink-muted" />
+            ) : (
+              <Hash size={17} className="text-ink-muted" />
+            )}
+            <h1 className="truncate text-base font-bold">{activeChannel?.name ?? "…"}</h1>
+            {activeChannel?.topic && (
+              <span className="hidden truncate border-l border-line pl-3 text-xs text-ink-muted md:inline">
+                {activeChannel.topic}
+              </span>
+            )}
+          </div>
+          <form onSubmit={onSearch} className="ml-auto flex items-center gap-2">
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-faint" />
+              <input
+                className="input-field w-56 rounded-full py-1.5 pl-8"
+                placeholder="Search workspace…"
+                value={searchQ}
+                onChange={(e) => setSearchQ(e.target.value)}
+              />
+            </div>
+            {searchResults && (
+              <button
+                type="button"
+                className="btn-ghost p-1.5"
+                title="Close search"
+                onClick={() => {
+                  setSearchResults(null);
+                  setSearchQ("");
+                }}
+              >
+                <X size={16} />
+              </button>
+            )}
+          </form>
+          {accessToken && <NotificationsBell accessToken={accessToken} channelNames={channelNames} />}
+        </header>
+
+        {/* Search results overlay */}
+        {searchResults && (
+          <div className="max-h-[45%] overflow-y-auto border-b border-line bg-surface px-5 py-4">
+            <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-ink-muted">
+              {searchResults.results.length === 0
+                ? "No results"
+                : `${searchResults.results.length}${searchResults.hasMore ? "+" : ""} results`}
+            </p>
+            <div className="flex flex-col gap-2">
+              {searchResults.results.map((r) => (
+                <button
+                  key={r.messageId}
+                  onClick={() => {
+                    setActiveId(r.channelId);
+                    setSearchResults(null);
+                    setSearchQ("");
+                  }}
+                  className="card p-3 text-left transition-colors hover:border-primary/40"
+                >
+                  <div className="mb-1 flex items-baseline gap-2 text-xs">
+                    <span className="font-semibold text-primary">#{r.channelName}</span>
+                    <span className="font-semibold">{r.author.displayName}</span>
+                    <span className="text-ink-faint">{new Date(r.createdAt).toLocaleString()}</span>
+                  </div>
+                  <p className="text-sm leading-6">{renderSnippet(r.snippet)}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Message list */}
+        <div className="flex-1 overflow-y-auto px-3 py-4">
           {nextCursor && (
-            <button onClick={() => loadOlder().catch((e) => setError(String(e)))} style={{ alignSelf: "center" }}>
-              Load older
-            </button>
+            <div className="mb-3 text-center">
+              <button
+                className="btn-secondary rounded-full px-4 py-1 text-xs"
+                onClick={() => loadOlder().catch((e) => setError(String(e)))}
+              >
+                Load older messages
+              </button>
+            </div>
           )}
-          {messages.map((m) => (
-            <div key={m.id}>
-              <strong>{m.author.displayName}</strong>{" "}
-              {m.deletedAt ? (
-                <em style={{ color: "#999" }}>message deleted</em>
-              ) : (
-                <span>
-                  {m.content}
-                  {m.editedAt && <em style={{ color: "#999" }}> (edited)</em>}
+          {grouped.map((group) => (
+            <div key={group.label}>
+              <div className="my-3 flex items-center gap-3 px-3">
+                <span className="h-px flex-1 bg-line" />
+                <span className="rounded-full border border-line bg-card px-3 py-0.5 text-[11px] font-semibold text-ink-muted">
+                  {group.label}
                 </span>
-              )}
-              {!m.deletedAt &&
-                m.attachments.map((a) =>
-                  a.contentType.startsWith("image/") ? (
-                    <div key={a.id} style={{ marginTop: 4 }}>
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={a.downloadUrl} alt={a.fileName} style={{ maxWidth: 320, maxHeight: 240, borderRadius: 4 }} />
-                    </div>
-                  ) : (
-                    <div key={a.id} style={{ marginTop: 4 }}>
-                      <a href={a.downloadUrl} target="_blank" rel="noreferrer">
-                        📎 {a.fileName}
-                      </a>{" "}
-                      <span style={{ color: "#999", fontSize: 12 }}>({Math.ceil(a.sizeBytes / 1024)} KB)</span>
-                    </div>
-                  ),
-                )}
+                <span className="h-px flex-1 bg-line" />
+              </div>
+              {group.items.map((m) => (
+                <MessageRow
+                  key={m.id}
+                  message={m}
+                  isOwn={m.author.id === user.id}
+                  onEdit={onEditMessage}
+                  onDelete={onDeleteMessage}
+                />
+              ))}
             </div>
           ))}
-          {messages.length === 0 && <p style={{ color: "#999" }}>No messages yet.</p>}
+          {messages.length === 0 && (
+            <p className="mt-10 text-center text-ink-muted">
+              No messages yet — say something in {activeChannel ? `#${activeChannel.name}` : "this channel"}.
+            </p>
+          )}
+          <div ref={bottomRef} />
         </div>
 
-        <p style={{ minHeight: 18, margin: 0, padding: "0 16px", color: "#999", fontSize: 12 }}>
-          {Object.values(typingUsers).length > 0 &&
-            `${Object.values(typingUsers).join(", ")} ${Object.values(typingUsers).length === 1 ? "is" : "are"} typing…`}
-        </p>
+        {/* Typing + errors */}
+        <div className="min-h-5 px-5 text-xs text-ink-muted">
+          {typingNames.length > 0 &&
+            `${typingNames.join(", ")} ${typingNames.length === 1 ? "is" : "are"} typing…`}
+        </div>
+        {error && <p className="px-5 pb-1 text-xs text-danger">{error}</p>}
 
-        {error && <p style={{ color: "crimson", padding: "0 16px" }}>{error}</p>}
-
-        {pendingUploads.length > 0 && (
-          <p style={{ margin: 0, padding: "4px 16px", color: "#666", fontSize: 12 }}>
-            📎 {pendingUploads.map((u) => u.fileName).join(", ")}{" "}
-            <button type="button" onClick={() => setPendingUploads([])}>clear</button>
-          </p>
-        )}
-        <form onSubmit={onSend} style={{ display: "flex", gap: 8, padding: 16, borderTop: "1px solid #ddd" }}>
-          <label style={{ cursor: "pointer", alignSelf: "center" }} title="Attach a file">
-            {uploading ? "⏳" : "📎"}
+        {/* Composer */}
+        <div className="border-t border-line px-5 py-4">
+          {pendingUploads.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {pendingUploads.map((u) => (
+                <span
+                  key={u.id}
+                  className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-xs"
+                >
+                  <Paperclip size={12} /> {u.fileName}
+                  <button
+                    type="button"
+                    className="text-ink-faint hover:text-danger"
+                    onClick={() => setPendingUploads((prev) => prev.filter((p) => p.id !== u.id))}
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <form onSubmit={onSend} className="flex items-center gap-2">
+            <label
+              className={`btn-ghost cursor-pointer p-2 ${uploading ? "animate-pulse" : ""}`}
+              title="Attach a file"
+            >
+              <Paperclip size={18} />
+              <input
+                type="file"
+                hidden
+                disabled={!activeId || uploading}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) onPickFile(file);
+                  e.target.value = "";
+                }}
+              />
+            </label>
             <input
-              type="file"
-              hidden
-              disabled={!activeId || uploading}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) onPickFile(file);
-                e.target.value = "";
-              }}
+              className="input-field rounded-xl py-2.5"
+              placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
+              value={draft}
+              onChange={(e) => onDraftChange(e.target.value)}
+              disabled={!activeId}
             />
-          </label>
-          <input
-            placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
-            value={draft}
-            onChange={(e) => onDraftChange(e.target.value)}
-            disabled={!activeId}
-            style={{ flex: 1 }}
-          />
-          <button type="submit" disabled={!activeId || uploading}>
-            Send
-          </button>
-        </form>
+            <button
+              type="submit"
+              className="btn-primary flex items-center gap-1.5 rounded-xl py-2.5"
+              disabled={!activeId || uploading}
+            >
+              <SendHorizonal size={16} />
+            </button>
+          </form>
+        </div>
       </section>
     </main>
   );

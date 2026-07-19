@@ -9,3 +9,4 @@ dist/
 coverage/
 apps/api/generated/
 packages/db/generated/
+designs/
