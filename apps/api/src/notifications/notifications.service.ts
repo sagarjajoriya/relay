@@ -1,6 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { prisma } from "@relay/db";
+import { prisma, type NotificationType } from "@relay/db";
 import type { NotificationResponse } from "@relay/contracts";
+import { extractMentionIds } from "../messages/messages.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { MailerService } from "./mailer.service";
 
@@ -25,8 +26,10 @@ export class NotificationsService {
 
     const { channel } = message;
 
-    // Recipients = users who can see the channel, minus the author.
-    const recipients =
+    // Base recipients = users who can see the channel, minus the author.
+    // Thread replies narrow to thread participants (parent author + earlier
+    // repliers) — notifying the whole channel for every reply is noise.
+    let recipients =
       channel.type === "PRIVATE"
         ? (
             await prisma.channelMember.findMany({
@@ -40,12 +43,28 @@ export class NotificationsService {
               include: { user: { select: { id: true, email: true } } },
             })
           ).map((m) => m.user);
+
+    // Mentioned users are always notified (typed MENTION), even in threads.
+    const mentionIds = new Set(extractMentionIds(message.content));
+
+    if (message.parentId) {
+      const participants = await prisma.message.findMany({
+        where: { OR: [{ id: message.parentId }, { parentId: message.parentId }] },
+        select: { authorId: true },
+      });
+      const participantIds = new Set(participants.map((p) => p.authorId));
+      recipients = recipients.filter((r) => participantIds.has(r.id) || mentionIds.has(r.id));
+    }
     if (recipients.length === 0) return;
+
+    const typeFor = (userId: string): NotificationType =>
+      mentionIds.has(userId) ? "MENTION" : message.parentId ? "THREAD_REPLY" : "MESSAGE";
 
     // Insert-once per (recipient, message): retries skip existing rows.
     await prisma.notification.createMany({
       data: recipients.map((r) => ({
         userId: r.id,
+        type: typeFor(r.id),
         workspaceId: channel.workspaceId,
         channelId: channel.id,
         messageId: message.id,
@@ -81,6 +100,13 @@ export class NotificationsService {
     this.logger.log(
       `fanned out message=${message.id} recipients=${recipients.length} emailed=${pending.length} onlineSkipped=${recipients.length - offline.length}`,
     );
+  }
+
+  async markAllRead(userId: string): Promise<void> {
+    await prisma.notification.updateMany({
+      where: { userId, readAt: null },
+      data: { readAt: new Date() },
+    });
   }
 
   async listForUser(userId: string): Promise<NotificationResponse[]> {

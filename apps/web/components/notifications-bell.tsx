@@ -63,7 +63,20 @@ export function NotificationsBell({
 
       {open && (
         <div className="absolute right-0 top-11 z-30 w-96 rounded-2xl border border-line bg-card shadow-[0px_4px_12px_rgba(0,0,0,0.05)]">
-          <div className="border-b border-line px-4 py-3 text-sm font-semibold">Notifications</div>
+          <div className="flex items-center justify-between border-b border-line px-4 py-3">
+            <span className="text-sm font-semibold">Notifications</span>
+            {unread > 0 && (
+              <button
+                className="text-xs font-semibold text-primary hover:underline"
+                onClick={async () => {
+                  await api.post("/notifications/read-all", {}, accessToken).catch(() => undefined);
+                  load();
+                }}
+              >
+                Mark all read
+              </button>
+            )}
+          </div>
           <ul className="max-h-96 overflow-y-auto">
             {items.map((n) => (
               <li
@@ -75,7 +88,14 @@ export function NotificationsBell({
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate text-sm">
                     <span className="font-semibold">{n.authorDisplayName ?? "Someone"}</span>{" "}
-                    <span className="text-ink-muted">in #{channelNames[n.channelId] ?? "unknown"}</span>
+                    <span className="text-ink-muted">
+                      {n.type === "MENTION"
+                        ? "mentioned you in"
+                        : n.type === "THREAD_REPLY"
+                          ? "replied in a thread in"
+                          : "in"}{" "}
+                      #{channelNames[n.channelId] ?? "unknown"}
+                    </span>
                   </span>
                   <span className="shrink-0 text-[11px] text-ink-faint">{relativeTime(n.createdAt)}</span>
                 </div>

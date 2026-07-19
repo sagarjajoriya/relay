@@ -25,3 +25,9 @@ export interface WorkspaceResponse {
   role: WorkspaceRole;
   createdAt: string;
 }
+
+export interface WorkspaceMemberResponse {
+  id: string;
+  displayName: string;
+  role: WorkspaceRole;
+}

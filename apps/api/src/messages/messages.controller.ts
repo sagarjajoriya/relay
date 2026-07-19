@@ -1,7 +1,8 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
 import {
   editMessageSchema,
   listMessagesQuerySchema,
+  reactionEmojiSchema,
   sendMessageSchema,
   type EditMessageInput,
   type ListMessagesQuery,
@@ -33,6 +34,42 @@ export class MessagesController {
     @Query(new ZodValidationPipe(listMessagesQuerySchema)) query: ListMessagesQuery,
   ) {
     return this.messages.list(user.userId, channelId, query);
+  }
+
+  @Post("messages/:messageId/replies")
+  reply(
+    @CurrentUser() user: RequestUser,
+    @Param("messageId") messageId: string,
+    @Body(new ZodValidationPipe(sendMessageSchema)) body: SendMessageInput,
+  ) {
+    return this.messages.reply(user.userId, messageId, body);
+  }
+
+  @Get("messages/:messageId/thread")
+  thread(
+    @CurrentUser() user: RequestUser,
+    @Param("messageId") messageId: string,
+    @Query(new ZodValidationPipe(listMessagesQuerySchema)) query: ListMessagesQuery,
+  ) {
+    return this.messages.listThread(user.userId, messageId, query);
+  }
+
+  @Put("messages/:messageId/reactions/:emoji")
+  react(
+    @CurrentUser() user: RequestUser,
+    @Param("messageId") messageId: string,
+    @Param("emoji", new ZodValidationPipe(reactionEmojiSchema)) emoji: string,
+  ) {
+    return this.messages.react(user.userId, messageId, emoji);
+  }
+
+  @Delete("messages/:messageId/reactions/:emoji")
+  unreact(
+    @CurrentUser() user: RequestUser,
+    @Param("messageId") messageId: string,
+    @Param("emoji", new ZodValidationPipe(reactionEmojiSchema)) emoji: string,
+  ) {
+    return this.messages.unreact(user.userId, messageId, emoji);
   }
 
   @Patch("messages/:messageId")

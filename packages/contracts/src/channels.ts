@@ -29,3 +29,6 @@ export interface ChannelResponse {
   topic: string | null;
   createdAt: string;
 }
+
+// channelId -> count of unread top-level messages (authored by others).
+export type UnreadCounts = Record<string, number>;

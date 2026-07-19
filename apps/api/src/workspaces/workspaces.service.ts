@@ -1,6 +1,6 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import { prisma } from "@relay/db";
-import type { WorkspaceResponse } from "@relay/contracts";
+import type { WorkspaceMemberResponse, WorkspaceResponse } from "@relay/contracts";
 
 @Injectable()
 export class WorkspacesService {
@@ -36,6 +36,21 @@ export class WorkspacesService {
     });
 
     return this.toResponse(workspace, membership.role);
+  }
+
+  async listMembers(userId: string, workspaceId: string): Promise<WorkspaceMemberResponse[]> {
+    const requester = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId } },
+    });
+    if (!requester) {
+      throw new NotFoundException("Workspace not found");
+    }
+    const members = await prisma.workspaceMember.findMany({
+      where: { workspaceId },
+      include: { user: { select: { id: true, displayName: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    return members.map((m) => ({ id: m.user.id, displayName: m.user.displayName, role: m.role }));
   }
 
   async listForUser(userId: string): Promise<WorkspaceResponse[]> {

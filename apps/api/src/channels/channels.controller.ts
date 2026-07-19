@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, UseGuards } from "@nestjs/common";
 import {
   addChannelMemberSchema,
   createChannelSchema,
@@ -32,6 +32,17 @@ export class ChannelsController {
   @Get("channels/:channelId")
   get(@CurrentUser() user: RequestUser, @Param("channelId") channelId: string) {
     return this.channels.get(user.userId, channelId);
+  }
+
+  @Post("channels/:channelId/read")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async markRead(@CurrentUser() user: RequestUser, @Param("channelId") channelId: string) {
+    await this.channels.markRead(user.userId, channelId);
+  }
+
+  @Get("workspaces/:workspaceId/unread")
+  unread(@CurrentUser() user: RequestUser, @Param("workspaceId") workspaceId: string) {
+    return this.channels.unreadCounts(user.userId, workspaceId);
   }
 
   @Post("channels/:channelId/members")

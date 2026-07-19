@@ -22,6 +22,8 @@ model User {
   messages          Message[]
   notifications     Notification[]
   attachments       Attachment[]
+  reactions         Reaction[]
+  channelReads      ChannelRead[]
 
   @@map("users")
 }
@@ -101,6 +103,7 @@ model Channel {
   members     ChannelMember[]
   messages    Message[]
   attachments Attachment[]
+  reads       ChannelRead[]
 
   @@unique([workspaceId, name])
   @@index([workspaceId])
@@ -129,6 +132,13 @@ model Message {
   id        String    @id @default(cuid())
   channelId String
   authorId  String
+  // Single-level threads: replies carry parentId; replies to replies are
+  // rejected in the service. replyCount/lastReplyAt are denormalized onto the
+  // parent inside the reply-create transaction — computing them per timeline
+  // page would be an N+1.
+  parentId    String?
+  replyCount  Int       @default(0)
+  lastReplyAt DateTime?
   content   String
   // Stored generated column (see the message_search migration): Postgres
   // recomputes to_tsvector('english', content) on every write, so search
@@ -143,10 +153,44 @@ model Message {
   channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
   author      User         @relation(fields: [authorId], references: [id])
   attachments Attachment[]
+  parent      Message?     @relation("thread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Message[]    @relation("thread")
+  reactions   Reaction[]
 
   // Compound index backs the (createdAt, id) keyset cursor used for pagination.
   @@index([channelId, createdAt, id])
+  @@index([parentId])
   @@map("messages")
+}
+
+model Reaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // One reaction per (user, emoji, message): PUT is naturally idempotent.
+  @@unique([messageId, userId, emoji])
+  @@map("reactions")
+}
+
+// Per-user last-read watermark per channel. Separate from ChannelMember
+// because public channels deliberately have no membership rows (M2).
+model ChannelRead {
+  id         String   @id @default(cuid())
+  userId     String
+  channelId  String
+  lastReadAt DateTime
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channelId])
+  @@map("channel_reads")
 }
 
 enum AttachmentStatus {
@@ -179,8 +223,9 @@ model Attachment {
 }
 
 enum NotificationType {
-  // MENTION, DM, etc. arrive with M8 — the enum is the seam.
   MESSAGE
+  MENTION
+  THREAD_REPLY
 }
 
 model Notification {

@@ -184,6 +184,17 @@ export class RealtimeGateway {
   @OnEvent(WS_EVENTS.messageCreated)
   broadcastCreated(message: MessageResponse) {
     this.server.to(channelRoom(message.channelId)).emit(WS_EVENTS.messageCreated, message);
+    // Light unread signal to the whole workspace: sockets only join the room
+    // of the channel they're viewing, so badge bumps for other channels need a
+    // workspace-wide event. Replies don't count toward channel unread.
+    if (!message.parentId) {
+      this.server.to(workspaceRoom(message.workspaceId)).emit(WS_EVENTS.channelActivity, {
+        workspaceId: message.workspaceId,
+        channelId: message.channelId,
+        messageId: message.id,
+        authorId: message.author.id,
+      });
+    }
   }
 
   @OnEvent(WS_EVENTS.messageUpdated)

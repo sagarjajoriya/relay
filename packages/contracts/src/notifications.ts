@@ -1,6 +1,6 @@
 export interface NotificationResponse {
   id: string;
-  type: "MESSAGE";
+  type: "MESSAGE" | "MENTION" | "THREAD_REPLY";
   workspaceId: string;
   channelId: string;
   messageId: string;

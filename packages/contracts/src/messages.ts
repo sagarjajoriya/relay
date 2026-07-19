@@ -29,13 +29,34 @@ export interface MessageAuthor {
   displayName: string;
 }
 
+// Aggregated per emoji; userIds let each viewer derive "did I react" from the
+// same shared broadcast payload (viewer-specific fields can't ride WS events).
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
+export const reactionEmojiSchema = z.string().min(1).max(32);
+
+export const MENTION_TOKEN_REGEX = /<@([a-z0-9]+)>/g;
+
 // The canonical message shape. REST returns this today; M3 will broadcast the
 // identical object over WebSocket as `message.created` / `message.updated`, so
 // this interface is the single contract both transports share.
 export interface MessageResponse {
   id: string;
   channelId: string;
+  workspaceId: string;
   author: MessageAuthor;
+  // Thread fields: parentId set on replies (excluded from channel timeline);
+  // replyCount/lastReplyAt maintained on the parent.
+  parentId: string | null;
+  replyCount: number;
+  lastReplyAt: string | null;
+  reactions: ReactionSummary[];
+  // Users referenced by <@id> tokens in content, resolved server-side.
+  mentions: MessageAuthor[];
   // null when the message is a tombstone (soft-deleted).
   content: string | null;
   // Empty for tombstones; download URLs are short-lived pre-signed GETs.

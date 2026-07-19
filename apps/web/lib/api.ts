@@ -35,6 +35,8 @@ export const api = {
   get: <T>(path: string, token?: string) => request<T>(path, { headers: authHeaders(token) }),
   post: <T>(path: string, body: unknown, token?: string) =>
     request<T>(path, { method: "POST", body: JSON.stringify(body), headers: authHeaders(token) }),
+  put: <T>(path: string, body: unknown, token?: string) =>
+    request<T>(path, { method: "PUT", body: JSON.stringify(body), headers: authHeaders(token) }),
   patch: <T>(path: string, body: unknown, token?: string) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body), headers: authHeaders(token) }),
   del: <T>(path: string, token?: string) =>

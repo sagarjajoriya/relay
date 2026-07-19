@@ -1,6 +1,6 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { prisma, type Channel } from "@relay/db";
-import type { ChannelResponse, CreateChannelInput } from "@relay/contracts";
+import { prisma, Prisma, type Channel } from "@relay/db";
+import type { ChannelResponse, CreateChannelInput, UnreadCounts } from "@relay/contracts";
 
 @Injectable()
 export class ChannelsService {
@@ -62,6 +62,45 @@ export class ChannelsService {
     });
 
     return this.toResponse(channel);
+  }
+
+  async markRead(userId: string, channelId: string): Promise<void> {
+    await this.assertCanAccess(userId, channelId);
+    await prisma.channelRead.upsert({
+      where: { userId_channelId: { userId, channelId } },
+      update: { lastReadAt: new Date() },
+      create: { userId, channelId, lastReadAt: new Date() },
+    });
+  }
+
+  // Unread top-level messages per visible channel, in one query: LEFT JOIN the
+  // user's read watermark and count newer messages authored by others.
+  // Channels with zero unread simply don't appear in the result.
+  async unreadCounts(userId: string, workspaceId: string): Promise<UnreadCounts> {
+    await this.assertWorkspaceMember(userId, workspaceId);
+
+    const rows = await prisma.$queryRaw<{ channel_id: string; unread: number }[]>(Prisma.sql`
+      SELECT c.id AS channel_id, COUNT(m.id)::int AS unread
+      FROM channels c
+      LEFT JOIN channel_reads r ON r."channelId" = c.id AND r."userId" = ${userId}
+      JOIN messages m ON m."channelId" = c.id
+        AND m."deletedAt" IS NULL
+        AND m."parentId" IS NULL
+        AND m."authorId" <> ${userId}
+        AND (r."lastReadAt" IS NULL OR m."createdAt" > r."lastReadAt")
+      WHERE c."workspaceId" = ${workspaceId}
+        AND c."archivedAt" IS NULL
+        AND (
+          c.type = 'PUBLIC'
+          OR EXISTS (
+            SELECT 1 FROM channel_members cm
+            WHERE cm."channelId" = c.id AND cm."userId" = ${userId}
+          )
+        )
+      GROUP BY c.id
+    `);
+
+    return Object.fromEntries(rows.map((r) => [r.channel_id, r.unread]));
   }
 
   // Shared visibility gate reused by MessagesService. Returns the channel so

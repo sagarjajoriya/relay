@@ -20,6 +20,16 @@ export interface TypingEvent {
   user: { id: string; displayName: string };
 }
 
+// Lightweight signal broadcast to the whole workspace room on every top-level
+// message, so clients can bump unread badges for channels they're not viewing
+// (sockets only join the active channel's room).
+export interface ChannelActivityEvent {
+  workspaceId: string;
+  channelId: string;
+  messageId: string;
+  authorId: string;
+}
+
 export interface PresenceUser {
   id: string;
   displayName: string;
@@ -48,6 +58,7 @@ export const WS_EVENTS = {
   typingStopped: "typing.stopped",
   presenceOnline: "presence.online",
   presenceOffline: "presence.offline",
+  channelActivity: "channel.activity",
 } as const;
 
 export interface ServerToClientEvents {
@@ -58,6 +69,7 @@ export interface ServerToClientEvents {
   [WS_EVENTS.typingStopped]: (event: TypingEvent) => void;
   [WS_EVENTS.presenceOnline]: (event: PresenceEvent) => void;
   [WS_EVENTS.presenceOffline]: (event: PresenceEvent) => void;
+  [WS_EVENTS.channelActivity]: (event: ChannelActivityEvent) => void;
 }
 
 export interface ClientToServerEvents {

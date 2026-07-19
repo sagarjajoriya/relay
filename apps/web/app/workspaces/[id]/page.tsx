@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   Hash,
   Lock,
+  MessageSquareText,
   Paperclip,
   Search,
   SendHorizonal,
@@ -17,6 +18,7 @@ import {
   SEARCH_MARK_END,
   SEARCH_MARK_START,
   WS_EVENTS,
+  type ChannelActivityEvent,
   type ChannelResponse,
   type MessageResponse,
   type PaginatedMessages,
@@ -24,6 +26,8 @@ import {
   type PresenceUser,
   type SearchResponse,
   type TypingEvent,
+  type UnreadCounts,
+  type WorkspaceMemberResponse,
 } from "@relay/contracts";
 import { Avatar } from "@/components/avatar";
 import { MessageRow } from "@/components/message-row";
@@ -56,19 +60,29 @@ export default function WorkspaceDetailPage() {
   const [newChannelPrivate, setNewChannelPrivate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
-  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({}); // userId -> displayName
-  const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({}); // userId -> displayName
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
+  const [onlineUsers, setOnlineUsers] = useState<Record<string, string>>({});
   const [searchQ, setSearchQ] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
   const [pendingUploads, setPendingUploads] = useState<{ id: string; fileName: string }[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [unread, setUnread] = useState<UnreadCounts>({});
+  const [members, setMembers] = useState<WorkspaceMemberResponse[]>([]);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  // Thread panel
+  const [threadRoot, setThreadRoot] = useState<MessageResponse | null>(null);
+  const [threadMessages, setThreadMessages] = useState<MessageResponse[]>([]);
+  const [threadDraft, setThreadDraft] = useState("");
+
   const socketRef = useRef<RelaySocket | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  // Handlers below are registered once per socket; this ref lets them see the
-  // current channel so a broadcast racing a channel switch can't leak into the
-  // wrong message list.
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+  const threadRootIdRef = useRef<string | null>(null);
+  threadRootIdRef.current = threadRoot?.id ?? null;
+  // Display-name -> id map of mentions picked from the autocomplete; applied
+  // at send time to produce canonical <@id> tokens.
+  const pickedMentionsRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     if (ready && !user) router.push("/login");
@@ -82,10 +96,29 @@ export default function WorkspaceDetailPage() {
   }, [accessToken, workspaceId]);
 
   useEffect(() => {
-    if (accessToken) loadChannels().catch((e) => setError(String(e)));
-  }, [accessToken, loadChannels]);
+    if (!accessToken) return;
+    loadChannels().catch((e) => setError(String(e)));
+    api.get<UnreadCounts>(`/workspaces/${workspaceId}/unread`, accessToken).then(setUnread).catch(() => undefined);
+    api
+      .get<WorkspaceMemberResponse[]>(`/workspaces/${workspaceId}/members`, accessToken)
+      .then(setMembers)
+      .catch(() => undefined);
+  }, [accessToken, workspaceId, loadChannels]);
 
-  // Load the newest page whenever the active channel changes.
+  const markRead = useCallback(
+    (channelId: string) => {
+      if (!accessToken) return;
+      api.post(`/channels/${channelId}/read`, {}, accessToken).catch(() => undefined);
+      setUnread((prev) => {
+        if (!(channelId in prev)) return prev;
+        const { [channelId]: _, ...rest } = prev;
+        return rest;
+      });
+    },
+    [accessToken],
+  );
+
+  // Load the newest page + clear unread whenever the active channel changes.
   useEffect(() => {
     if (!accessToken || !activeId) return;
     let cancelled = false;
@@ -94,24 +127,40 @@ export default function WorkspaceDetailPage() {
       if (cancelled) return;
       setMessages([...page.messages].reverse());
       setNextCursor(page.nextCursor);
+      markRead(activeId);
     })().catch((e) => setError(String(e)));
+    setThreadRoot(null);
+    setThreadMessages([]);
     return () => {
       cancelled = true;
     };
-  }, [accessToken, activeId]);
+  }, [accessToken, activeId, markRead]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "instant", block: "end" });
   }, [messages.length, activeId]);
 
-  // One socket per page lifetime; message handlers are registered once and
-  // filter by the active channel via the ref above.
   useEffect(() => {
     if (!accessToken) return;
     const socket = createSocket(accessToken);
     socketRef.current = socket;
 
-    const upsert = (incoming: MessageResponse) => {
+    // Routes an incoming message to the right pane: replies belong to the
+    // thread panel (when open); top-level messages belong to the timeline of
+    // the active channel. The refs keep once-registered handlers current.
+    const route = (incoming: MessageResponse) => {
+      if (incoming.parentId) {
+        if (incoming.parentId === threadRootIdRef.current) {
+          setThreadMessages((prev) => {
+            const idx = prev.findIndex((m) => m.id === incoming.id);
+            if (idx === -1) return [...prev, incoming];
+            const next = [...prev];
+            next[idx] = incoming;
+            return next;
+          });
+        }
+        return;
+      }
       if (incoming.channelId !== activeIdRef.current) return;
       setMessages((prev) => {
         const idx = prev.findIndex((m) => m.id === incoming.id);
@@ -120,7 +169,7 @@ export default function WorkspaceDetailPage() {
         next[idx] = incoming;
         return next;
       });
-      // Any message activity clears that author's typing indicator.
+      if (incoming.id === threadRootIdRef.current) setThreadRoot(incoming);
       setTypingUsers((prev) => {
         if (!(incoming.author.id in prev)) return prev;
         const { [incoming.author.id]: _, ...rest } = prev;
@@ -128,9 +177,9 @@ export default function WorkspaceDetailPage() {
       });
     };
 
-    socket.on(WS_EVENTS.messageCreated, upsert);
-    socket.on(WS_EVENTS.messageUpdated, upsert);
-    socket.on(WS_EVENTS.messageDeleted, upsert);
+    socket.on(WS_EVENTS.messageCreated, route);
+    socket.on(WS_EVENTS.messageUpdated, route);
+    socket.on(WS_EVENTS.messageDeleted, route);
     socket.on(WS_EVENTS.typing, (e: TypingEvent) =>
       setTypingUsers((prev) => ({ ...prev, [e.user.id]: e.user.displayName })),
     );
@@ -151,11 +200,18 @@ export default function WorkspaceDetailPage() {
         return rest;
       });
     });
+    // Workspace-wide unread signal: bump badges for channels we're not viewing.
+    socket.on(WS_EVENTS.channelActivity, (e: ChannelActivityEvent) => {
+      if (e.workspaceId !== workspaceId || e.authorId === user?.id) return;
+      if (e.channelId === activeIdRef.current) {
+        // Visible right now — advance the watermark instead of badging.
+        if (accessToken) api.post(`/channels/${e.channelId}/read`, {}, accessToken).catch(() => undefined);
+        return;
+      }
+      setUnread((prev) => ({ ...prev, [e.channelId]: (prev[e.channelId] ?? 0) + 1 }));
+    });
     socket.on("connect_error", () => setDisconnected(true));
     socket.on("disconnect", () => setDisconnected(true));
-
-    // Seed the online list after the socket is up (so we don't miss the gap
-    // between fetch and subscribe).
     socket.on("connect", () => {
       setDisconnected(false);
       api
@@ -171,8 +227,6 @@ export default function WorkspaceDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, workspaceId]);
 
-  // Join the active channel's room (server re-checks access) and reset typing
-  // state on every switch.
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || !activeId) return;
@@ -195,7 +249,7 @@ export default function WorkspaceDetailPage() {
     setNextCursor(page.nextCursor);
   }
 
-  function upsertLocal(msg: MessageResponse) {
+  function upsertTimeline(msg: MessageResponse) {
     setMessages((prev) => {
       const idx = prev.findIndex((m) => m.id === msg.id);
       if (idx === -1) return [...prev, msg];
@@ -203,6 +257,16 @@ export default function WorkspaceDetailPage() {
       next[idx] = msg;
       return next;
     });
+    if (msg.id === threadRootIdRef.current) setThreadRoot(msg);
+  }
+
+  // Replace picked "@Display Name" spans with canonical <@id> tokens.
+  function canonicalizeMentions(text: string): string {
+    let out = text;
+    for (const [name, id] of Object.entries(pickedMentionsRef.current)) {
+      out = out.split(`@${name}`).join(`<@${id}>`);
+    }
+    return out;
   }
 
   async function onSend(e: FormEvent) {
@@ -214,20 +278,53 @@ export default function WorkspaceDetailPage() {
     try {
       const msg = await api.post<MessageResponse>(
         `/channels/${activeId}/messages`,
-        { content: draft, attachmentIds: pendingUploads.map((u) => u.id) },
+        { content: canonicalizeMentions(draft), attachmentIds: pendingUploads.map((u) => u.id) },
         accessToken,
       );
-      upsertLocal(msg);
+      upsertTimeline(msg);
       setDraft("");
       setPendingUploads([]);
+      pickedMentionsRef.current = {};
+      setMentionQuery(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to send");
     }
   }
 
+  async function openThread(root: MessageResponse) {
+    if (!accessToken) return;
+    setThreadRoot(root);
+    setThreadMessages([]);
+    try {
+      const page = await api.get<PaginatedMessages>(`/messages/${root.id}/thread?limit=100`, accessToken);
+      setThreadMessages(page.messages);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load thread");
+    }
+  }
+
+  async function onSendReply(e: FormEvent) {
+    e.preventDefault();
+    if (!accessToken || !threadRoot || !threadDraft.trim()) return;
+    setError(null);
+    try {
+      const reply = await api.post<MessageResponse>(
+        `/messages/${threadRoot.id}/replies`,
+        { content: threadDraft },
+        accessToken,
+      );
+      setThreadMessages((prev) => (prev.some((m) => m.id === reply.id) ? prev : [...prev, reply]));
+      setThreadDraft("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to reply");
+    }
+  }
+
   async function onEditMessage(id: string, content: string) {
     try {
-      upsertLocal(await api.patch<MessageResponse>(`/messages/${id}`, { content }, accessToken!));
+      const updated = await api.patch<MessageResponse>(`/messages/${id}`, { content }, accessToken!);
+      if (updated.parentId) setThreadMessages((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      else upsertTimeline(updated);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to edit");
     }
@@ -235,9 +332,24 @@ export default function WorkspaceDetailPage() {
 
   async function onDeleteMessage(id: string) {
     try {
-      upsertLocal(await api.del<MessageResponse>(`/messages/${id}`, accessToken!));
+      const deleted = await api.del<MessageResponse>(`/messages/${id}`, accessToken!);
+      if (deleted.parentId) setThreadMessages((prev) => prev.map((m) => (m.id === id ? deleted : m)));
+      else upsertTimeline(deleted);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to delete");
+    }
+  }
+
+  async function onToggleReaction(id: string, emoji: string, reacted: boolean) {
+    try {
+      const path = `/messages/${id}/reactions/${encodeURIComponent(emoji)}`;
+      const updated = reacted
+        ? await api.del<MessageResponse>(path, accessToken!)
+        : await api.put<MessageResponse>(path, {}, accessToken!);
+      if (updated.parentId) setThreadMessages((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      else upsertTimeline(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to react");
     }
   }
 
@@ -265,7 +377,6 @@ export default function WorkspaceDetailPage() {
     }
   }
 
-  // Debounced typing signal: emit start on first keystroke, stop after 2s idle.
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function stopTyping() {
@@ -278,6 +389,9 @@ export default function WorkspaceDetailPage() {
 
   function onDraftChange(value: string) {
     setDraft(value);
+    // Mention autocomplete: an "@" at start-of-word opens the member popup.
+    const at = /(^|\s)@([^@]*)$/.exec(value);
+    setMentionQuery(at ? at[2] : null);
     if (!activeId || !socketRef.current) return;
     if (!typingTimeoutRef.current) {
       socketRef.current.emit(WS_EVENTS.typingStart, { channelId: activeId });
@@ -285,6 +399,12 @@ export default function WorkspaceDetailPage() {
       clearTimeout(typingTimeoutRef.current);
     }
     typingTimeoutRef.current = setTimeout(stopTyping, 2000);
+  }
+
+  function pickMention(member: WorkspaceMemberResponse) {
+    setDraft((prev) => prev.replace(/(^|\s)@([^@]*)$/, `$1@${member.displayName} `));
+    pickedMentionsRef.current[member.displayName] = member.id;
+    setMentionQuery(null);
   }
 
   async function onSearch(e: FormEvent) {
@@ -302,9 +422,6 @@ export default function WorkspaceDetailPage() {
     }
   }
 
-  // Snippets arrive with control-char delimiters around matches; splitting and
-  // rendering as text nodes keeps untrusted message content out of any HTML
-  // path entirely.
   function renderSnippet(snippet: string) {
     return snippet.split(SEARCH_MARK_START).flatMap((part, i) => {
       if (i === 0) return [<span key={i}>{part}</span>];
@@ -342,8 +459,11 @@ export default function WorkspaceDetailPage() {
   const activeChannel = channels.find((c) => c.id === activeId) ?? null;
   const channelNames = Object.fromEntries(channels.map((c) => [c.id, c.name]));
   const typingNames = Object.values(typingUsers);
+  const mentionMatches =
+    mentionQuery !== null
+      ? members.filter((m) => m.displayName.toLowerCase().startsWith(mentionQuery.toLowerCase())).slice(0, 5)
+      : [];
 
-  // Day-divider grouping (messages are already oldest -> newest).
   const grouped: { label: string; items: MessageResponse[] }[] = [];
   for (const m of messages) {
     const label = dayLabel(m.createdAt);
@@ -368,21 +488,31 @@ export default function WorkspaceDetailPage() {
             Channels
           </div>
           <ul className="flex flex-col gap-0.5">
-            {channels.map((c) => (
-              <li key={c.id}>
-                <button
-                  onClick={() => setActiveId(c.id)}
-                  className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
-                    c.id === activeId
-                      ? "bg-primary text-white"
-                      : "text-sidebar-ink hover:bg-sidebar-hover hover:text-white"
-                  }`}
-                >
-                  {c.type === "PRIVATE" ? <Lock size={14} className="shrink-0" /> : <Hash size={14} className="shrink-0" />}
-                  <span className="truncate">{c.name}</span>
-                </button>
-              </li>
-            ))}
+            {channels.map((c) => {
+              const count = unread[c.id] ?? 0;
+              return (
+                <li key={c.id}>
+                  <button
+                    onClick={() => setActiveId(c.id)}
+                    className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                      c.id === activeId
+                        ? "bg-primary text-white"
+                        : count > 0
+                          ? "font-semibold text-white hover:bg-sidebar-hover"
+                          : "text-sidebar-ink hover:bg-sidebar-hover hover:text-white"
+                    }`}
+                  >
+                    {c.type === "PRIVATE" ? <Lock size={14} className="shrink-0" /> : <Hash size={14} className="shrink-0" />}
+                    <span className="truncate">{c.name}</span>
+                    {count > 0 && c.id !== activeId && (
+                      <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        {count > 99 ? "99+" : count}
+                      </span>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
 
           <form onSubmit={onCreateChannel} className="mt-3 flex flex-col gap-2 px-2">
@@ -482,7 +612,6 @@ export default function WorkspaceDetailPage() {
           {accessToken && <NotificationsBell accessToken={accessToken} channelNames={channelNames} />}
         </header>
 
-        {/* Search results overlay */}
         {searchResults && (
           <div className="max-h-[45%] overflow-y-auto border-b border-line bg-surface px-5 py-4">
             <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-ink-muted">
@@ -513,7 +642,6 @@ export default function WorkspaceDetailPage() {
           </div>
         )}
 
-        {/* Message list */}
         <div className="flex-1 overflow-y-auto px-3 py-4">
           {nextCursor && (
             <div className="mb-3 text-center">
@@ -538,9 +666,11 @@ export default function WorkspaceDetailPage() {
                 <MessageRow
                   key={m.id}
                   message={m}
-                  isOwn={m.author.id === user.id}
+                  currentUserId={user.id}
                   onEdit={onEditMessage}
                   onDelete={onDeleteMessage}
+                  onToggleReaction={onToggleReaction}
+                  onOpenThread={openThread}
                 />
               ))}
             </div>
@@ -553,15 +683,28 @@ export default function WorkspaceDetailPage() {
           <div ref={bottomRef} />
         </div>
 
-        {/* Typing + errors */}
         <div className="min-h-5 px-5 text-xs text-ink-muted">
           {typingNames.length > 0 &&
             `${typingNames.join(", ")} ${typingNames.length === 1 ? "is" : "are"} typing…`}
         </div>
         {error && <p className="px-5 pb-1 text-xs text-danger">{error}</p>}
 
-        {/* Composer */}
-        <div className="border-t border-line px-5 py-4">
+        <div className="relative border-t border-line px-5 py-4">
+          {mentionMatches.length > 0 && (
+            <div className="absolute bottom-full left-5 z-20 mb-1 w-64 rounded-xl border border-line bg-card p-1 shadow-md">
+              {mentionMatches.map((m) => (
+                <button
+                  key={m.id}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-primary-tint"
+                  onClick={() => pickMention(m)}
+                >
+                  <Avatar name={m.displayName} size="sm" />
+                  <span className="text-sm">{m.displayName}</span>
+                  {m.id === user.id && <span className="text-xs text-ink-faint">(you)</span>}
+                </button>
+              ))}
+            </div>
+          )}
           {pendingUploads.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2">
               {pendingUploads.map((u) => (
@@ -582,10 +725,7 @@ export default function WorkspaceDetailPage() {
             </div>
           )}
           <form onSubmit={onSend} className="flex items-center gap-2">
-            <label
-              className={`btn-ghost cursor-pointer p-2 ${uploading ? "animate-pulse" : ""}`}
-              title="Attach a file"
-            >
+            <label className={`btn-ghost cursor-pointer p-2 ${uploading ? "animate-pulse" : ""}`} title="Attach a file">
               <Paperclip size={18} />
               <input
                 type="file"
@@ -600,7 +740,7 @@ export default function WorkspaceDetailPage() {
             </label>
             <input
               className="input-field rounded-xl py-2.5"
-              placeholder={activeChannel ? `Message #${activeChannel.name}` : "Select a channel"}
+              placeholder={activeChannel ? `Message #${activeChannel.name} — type @ to mention` : "Select a channel"}
               value={draft}
               onChange={(e) => onDraftChange(e.target.value)}
               disabled={!activeId}
@@ -615,6 +755,55 @@ export default function WorkspaceDetailPage() {
           </form>
         </div>
       </section>
+
+      {/* ---- Thread panel ---- */}
+      {threadRoot && (
+        <aside className="flex w-96 shrink-0 flex-col border-l border-line bg-card">
+          <header className="flex items-center justify-between border-b border-line px-4 py-3">
+            <span className="flex items-center gap-2 font-semibold">
+              <MessageSquareText size={16} className="text-primary" /> Thread
+            </span>
+            <button className="btn-ghost p-1.5" title="Close thread" onClick={() => setThreadRoot(null)}>
+              <X size={16} />
+            </button>
+          </header>
+          <div className="flex-1 overflow-y-auto px-2 py-3">
+            <div className="border-b border-line pb-2">
+              <MessageRow
+                message={threadRoot}
+                currentUserId={user.id}
+                onEdit={onEditMessage}
+                onDelete={onDeleteMessage}
+                onToggleReaction={onToggleReaction}
+              />
+            </div>
+            <p className="px-3 py-2 text-[11px] font-semibold uppercase tracking-widest text-ink-muted">
+              {threadRoot.replyCount} {threadRoot.replyCount === 1 ? "reply" : "replies"}
+            </p>
+            {threadMessages.map((m) => (
+              <MessageRow
+                key={m.id}
+                message={m}
+                currentUserId={user.id}
+                onEdit={onEditMessage}
+                onDelete={onDeleteMessage}
+                onToggleReaction={onToggleReaction}
+              />
+            ))}
+          </div>
+          <form onSubmit={onSendReply} className="flex items-center gap-2 border-t border-line px-4 py-3">
+            <input
+              className="input-field rounded-xl py-2"
+              placeholder="Reply…"
+              value={threadDraft}
+              onChange={(e) => setThreadDraft(e.target.value)}
+            />
+            <button type="submit" className="btn-primary rounded-xl px-3 py-2">
+              <SendHorizonal size={15} />
+            </button>
+          </form>
+        </aside>
+      )}
     </main>
   );
 }

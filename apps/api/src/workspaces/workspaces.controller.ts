@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, UseGuards } from "@nestjs/common";
 import {
   createWorkspaceSchema,
   joinWorkspaceSchema,
@@ -34,5 +34,10 @@ export class WorkspacesController {
   @Get()
   list(@CurrentUser() user: RequestUser) {
     return this.workspaces.listForUser(user.userId);
+  }
+
+  @Get(":workspaceId/members")
+  members(@CurrentUser() user: RequestUser, @Param("workspaceId") workspaceId: string) {
+    return this.workspaces.listMembers(user.userId, workspaceId);
   }
 }
